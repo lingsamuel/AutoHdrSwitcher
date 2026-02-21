@@ -74,7 +74,7 @@ public sealed class MainForm : Form
 
     private void InitializeLayout()
     {
-        Text = "AutoHdrSwitcher";
+        Text = $"AutoHdrSwitcher v{GetAppVersion()}";
         Width = 1200;
         Height = 760;
         MinimumSize = new Size(980, 640);
@@ -87,6 +87,14 @@ public sealed class MainForm : Form
         Controls.Add(splitContainer);
         Controls.Add(topPanel);
         Controls.Add(statusStrip);
+    }
+
+    private static string GetAppVersion()
+    {
+        var version = typeof(MainForm).Assembly.GetName().Version;
+        return version is null
+            ? "unknown"
+            : $"{version.Major}.{version.Minor}.{version.Build}";
     }
 
     private TableLayoutPanel BuildTopPanel()
