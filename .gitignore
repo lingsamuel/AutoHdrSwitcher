@@ -1,0 +1,21 @@
+# Build outputs
+[Bb]in/
+[Oo]bj/
+artifacts/
+
+# Runtime/local config
+config.json
+
+# IDE/editor files
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Logs and OS files
+*.log
+Thumbs.db
+.DS_Store

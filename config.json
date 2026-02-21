@@ -1,0 +1,26 @@
+{
+  "pollIntervalSeconds": 2,
+  "processRules": [
+    {
+      "pattern": "eldenring",
+      "exactMatch": false,
+      "caseSensitive": false,
+      "regexMode": false,
+      "enabled": true
+    },
+    {
+      "pattern": "GameLauncher.exe",
+      "exactMatch": true,
+      "caseSensitive": true,
+      "regexMode": false,
+      "enabled": true
+    },
+    {
+      "pattern": "^(ffxiv|ffxiv_dx11)\\.exe$",
+      "exactMatch": false,
+      "caseSensitive": false,
+      "regexMode": true,
+      "enabled": true
+    }
+  ]
+}
