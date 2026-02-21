@@ -7,9 +7,20 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
-        ApplicationConfiguration.Initialize();
-        var configPath = ResolveConfigPath(args);
-        Application.Run(new MainForm(configPath));
+        try
+        {
+            ApplicationConfiguration.Initialize();
+            var configPath = ResolveConfigPath(args);
+            Application.Run(new MainForm(configPath));
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                $"AutoHdrSwitcher failed to start.\n\n{ex}",
+                "AutoHdrSwitcher Startup Error",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
     }
 
     private static string ResolveConfigPath(string[] args)

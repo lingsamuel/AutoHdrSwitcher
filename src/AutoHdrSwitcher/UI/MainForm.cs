@@ -9,22 +9,36 @@ public sealed class MainForm : Form
 {
     private const int MinPollSeconds = 1;
     private const int MaxPollSeconds = 30;
+    private const int MainTopPanelMinSize = 120;
+    private const int MainBottomPanelMinSize = 220;
+    private const int RuntimeTopPanelMinSize = 60;
+    private const int RuntimeBottomPanelMinSize = 60;
+    private const int RuntimeMiddlePanelMinSize = 60;
+    private const int RuntimeBottomSectionMinSize = 60;
 
     private readonly string _configPath;
     private readonly ProcessMonitorService _monitorService = new();
     private readonly ProcessEventMonitor _processEventMonitor = new();
+    private readonly WindowPlacementSettings _windowSettings = WindowPlacementSettings.Default;
     private readonly BindingList<ProcessWatchRuleRow> _ruleRows = new();
     private readonly BindingList<ProcessMatchRow> _matchRows = new();
     private readonly BindingList<FullscreenProcessRow> _fullscreenRows = new();
     private readonly BindingList<DisplayHdrRow> _displayRows = new();
+    private readonly Dictionary<string, bool> _fullscreenIgnoreMap = new(StringComparer.OrdinalIgnoreCase);
     private readonly System.Windows.Forms.Timer _monitorTimer = new();
     private readonly System.Windows.Forms.Timer _eventBurstTimer = new();
 
+    private SplitContainer _mainSplit = null!;
+    private SplitContainer _runtimeSplit = null!;
+    private SplitContainer _runtimeBottomSplit = null!;
     private DataGridView _ruleGrid = null!;
     private DataGridView _matchGrid = null!;
     private DataGridView _fullscreenGrid = null!;
     private DataGridView _displayGrid = null!;
+    private Label _pollLabel = null!;
     private NumericUpDown _pollSecondsInput = null!;
+    private CheckBox _pollingEnabledCheck = null!;
+    private CheckBox _minimizeToTrayCheck = null!;
     private CheckBox _monitorAllFullscreenCheck = null!;
     private ToolStripStatusLabel _monitorStateLabel = null!;
     private ToolStripStatusLabel _snapshotLabel = null!;
@@ -36,10 +50,16 @@ public sealed class MainForm : Form
     private ContextMenuStrip _trayMenu = null!;
 
     private bool _suppressDirtyTracking;
+    private bool _suppressFullscreenIgnoreEvents;
     private bool _hasUnsavedChanges;
     private bool _refreshInFlight;
     private int _eventBurstRemaining;
+    private bool _monitoringActive;
+    private bool _eventStreamAvailable;
     private bool _exitRequested;
+    private int? _loadedMainSplitterDistance;
+    private int? _loadedRuntimeTopSplitterDistance;
+    private int? _loadedRuntimeBottomSplitterDistance;
 
     public MainForm(string configPath)
     {
@@ -69,16 +89,29 @@ public sealed class MainForm : Form
         Controls.Add(statusStrip);
     }
 
-    private FlowLayoutPanel BuildTopPanel()
+    private TableLayoutPanel BuildTopPanel()
     {
-        var panel = new FlowLayoutPanel
+        var panel = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
+            AutoSize = true,
+            ColumnCount = 1,
+            RowCount = 2,
+            Padding = new Padding(8)
+        };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        var actionsRow = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             WrapContents = true,
             FlowDirection = FlowDirection.LeftToRight,
-            Padding = new Padding(8)
+            Margin = Padding.Empty,
+            Padding = Padding.Empty
         };
 
         var addRuleButton = new Button { Text = "Add Rule", AutoSize = true };
@@ -123,12 +156,12 @@ public sealed class MainForm : Form
         var refreshButton = new Button { Text = "Refresh Now", AutoSize = true };
         refreshButton.Click += (_, _) => _ = RefreshSnapshotAsync();
 
-        var pollLabel = new Label
+        _pollLabel = new Label
         {
             Text = "Poll (sec):",
             AutoSize = true,
             TextAlign = ContentAlignment.MiddleCenter,
-            Margin = new Padding(18, 9, 4, 0)
+            Margin = new Padding(0, 5, 4, 0)
         };
 
         _pollSecondsInput = new NumericUpDown
@@ -137,14 +170,34 @@ public sealed class MainForm : Form
             Maximum = MaxPollSeconds,
             Value = 2,
             Width = 64,
-            Margin = new Padding(0, 6, 0, 0)
+            Margin = new Padding(0, 2, 0, 0)
         };
+
+        _pollingEnabledCheck = new CheckBox
+        {
+            Text = "Enable polling",
+            AutoSize = true,
+            Margin = new Padding(8, 4, 0, 0)
+        };
+        _pollingEnabledCheck.CheckedChanged += (_, _) =>
+        {
+            ApplyPollingMode();
+            MarkDirty();
+        };
+
+        _minimizeToTrayCheck = new CheckBox
+        {
+            Text = "Minimize to tray",
+            AutoSize = true,
+            Margin = new Padding(0, 4, 12, 0)
+        };
+        _minimizeToTrayCheck.CheckedChanged += (_, _) => MarkDirty();
 
         _monitorAllFullscreenCheck = new CheckBox
         {
             Text = "Auto monitor all fullscreen processes",
             AutoSize = true,
-            Margin = new Padding(18, 9, 0, 0)
+            Margin = new Padding(0, 4, 0, 0)
         };
         _monitorAllFullscreenCheck.CheckedChanged += (_, _) =>
         {
@@ -152,26 +205,68 @@ public sealed class MainForm : Form
             _ = RefreshSnapshotAsync();
         };
 
-        panel.Controls.Add(addRuleButton);
-        panel.Controls.Add(removeRuleButton);
-        panel.Controls.Add(saveButton);
-        panel.Controls.Add(reloadButton);
-        panel.Controls.Add(_startButton);
-        panel.Controls.Add(_stopButton);
-        panel.Controls.Add(refreshButton);
-        panel.Controls.Add(pollLabel);
-        panel.Controls.Add(_pollSecondsInput);
-        panel.Controls.Add(_monitorAllFullscreenCheck);
+        var monitorOptionsRow = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = true,
+            Anchor = AnchorStyles.Left | AnchorStyles.Top,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty
+        };
+        monitorOptionsRow.Controls.Add(_minimizeToTrayCheck);
+        monitorOptionsRow.Controls.Add(_monitorAllFullscreenCheck);
+
+        var configRow = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty
+        };
+        configRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        configRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        configRow.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        var pollRow = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty
+        };
+        pollRow.Controls.Add(_pollLabel);
+        pollRow.Controls.Add(_pollSecondsInput);
+        pollRow.Controls.Add(_pollingEnabledCheck);
+
+        actionsRow.Controls.Add(addRuleButton);
+        actionsRow.Controls.Add(removeRuleButton);
+        actionsRow.Controls.Add(saveButton);
+        actionsRow.Controls.Add(reloadButton);
+        actionsRow.Controls.Add(_startButton);
+        actionsRow.Controls.Add(_stopButton);
+        actionsRow.Controls.Add(refreshButton);
+
+        configRow.Controls.Add(monitorOptionsRow, 0, 0);
+        configRow.Controls.Add(pollRow, 1, 0);
+
+        panel.Controls.Add(actionsRow, 0, 0);
+        panel.Controls.Add(configRow, 0, 1);
         return panel;
     }
 
     private SplitContainer BuildSplitContainer()
     {
-        var split = new SplitContainer
+        _mainSplit = new SplitContainer
         {
             Dock = DockStyle.Fill,
-            Orientation = Orientation.Horizontal,
-            SplitterDistance = 360
+            Orientation = Orientation.Horizontal
         };
 
         var ruleGroup = new GroupBox
@@ -237,18 +332,16 @@ public sealed class MainForm : Form
             Padding = new Padding(10)
         };
 
-        var runtimeSplit = new SplitContainer
+        _runtimeSplit = new SplitContainer
         {
             Dock = DockStyle.Fill,
-            Orientation = Orientation.Horizontal,
-            SplitterDistance = 170
+            Orientation = Orientation.Horizontal
         };
 
-        var runtimeBottomSplit = new SplitContainer
+        _runtimeBottomSplit = new SplitContainer
         {
             Dock = DockStyle.Fill,
-            Orientation = Orientation.Horizontal,
-            SplitterDistance = 140
+            Orientation = Orientation.Horizontal
         };
 
         _matchGrid = new DataGridView
@@ -257,6 +350,7 @@ public sealed class MainForm : Form
             AutoGenerateColumns = false,
             DataSource = _matchRows,
             ReadOnly = true,
+            TabStop = false,
             AllowUserToAddRows = false,
             AllowUserToDeleteRows = false,
             ShowCellToolTips = false,
@@ -313,14 +407,15 @@ public sealed class MainForm : Form
             ToolTipText = string.Empty,
             Width = 230
         });
-        runtimeSplit.Panel1.Controls.Add(_matchGrid);
+        _runtimeSplit.Panel1.Controls.Add(_matchGrid);
 
         _fullscreenGrid = new DataGridView
         {
             Dock = DockStyle.Fill,
             AutoGenerateColumns = false,
             DataSource = _fullscreenRows,
-            ReadOnly = true,
+            ReadOnly = false,
+            TabStop = false,
             AllowUserToAddRows = false,
             AllowUserToDeleteRows = false,
             ShowCellToolTips = false,
@@ -333,6 +428,7 @@ public sealed class MainForm : Form
             HeaderText = "PID",
             DataPropertyName = nameof(FullscreenProcessRow.ProcessId),
             ToolTipText = string.Empty,
+            ReadOnly = true,
             Width = 85
         });
         _fullscreenGrid.Columns.Add(new DataGridViewTextBoxColumn
@@ -340,13 +436,23 @@ public sealed class MainForm : Form
             HeaderText = "Process",
             DataPropertyName = nameof(FullscreenProcessRow.ProcessName),
             ToolTipText = string.Empty,
+            ReadOnly = true,
             Width = 220
+        });
+        _fullscreenGrid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            HeaderText = "Executable",
+            DataPropertyName = nameof(FullscreenProcessRow.ExecutablePath),
+            ToolTipText = string.Empty,
+            ReadOnly = true,
+            AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill
         });
         _fullscreenGrid.Columns.Add(new DataGridViewTextBoxColumn
         {
             HeaderText = "Display",
             DataPropertyName = nameof(FullscreenProcessRow.Display),
             ToolTipText = string.Empty,
+            ReadOnly = true,
             Width = 145
         });
         _fullscreenGrid.Columns.Add(new DataGridViewCheckBoxColumn
@@ -354,9 +460,25 @@ public sealed class MainForm : Form
             HeaderText = "Matched Rule",
             DataPropertyName = nameof(FullscreenProcessRow.MatchedByRule),
             ToolTipText = string.Empty,
+            ReadOnly = true,
             Width = 95
         });
-        runtimeBottomSplit.Panel1.Controls.Add(_fullscreenGrid);
+        _fullscreenGrid.Columns.Add(new DataGridViewCheckBoxColumn
+        {
+            HeaderText = "Ignore",
+            DataPropertyName = nameof(FullscreenProcessRow.Ignore),
+            ToolTipText = string.Empty,
+            ReadOnly = false,
+            Width = 85
+        });
+        var fullscreenGroup = new GroupBox
+        {
+            Text = "Detected Fullscreen Processes",
+            Dock = DockStyle.Fill,
+            Padding = new Padding(8)
+        };
+        fullscreenGroup.Controls.Add(_fullscreenGrid);
+        _runtimeBottomSplit.Panel1.Controls.Add(fullscreenGroup);
 
         _displayGrid = new DataGridView
         {
@@ -364,6 +486,7 @@ public sealed class MainForm : Form
             AutoGenerateColumns = false,
             DataSource = _displayRows,
             ReadOnly = true,
+            TabStop = false,
             AllowUserToAddRows = false,
             AllowUserToDeleteRows = false,
             ShowCellToolTips = false,
@@ -413,16 +536,20 @@ public sealed class MainForm : Form
             ToolTipText = string.Empty,
             Width = 180
         });
-        runtimeBottomSplit.Panel2.Controls.Add(_displayGrid);
-        runtimeBottomSplit.Panel1MinSize = 120;
-        runtimeBottomSplit.Panel2MinSize = 160;
-        runtimeSplit.Panel2.Controls.Add(runtimeBottomSplit);
-        runtimeSplit.Panel2MinSize = 300;
-        runtimeGroup.Controls.Add(runtimeSplit);
+        var displayGroup = new GroupBox
+        {
+            Text = "Display HDR Status",
+            Dock = DockStyle.Fill,
+            Padding = new Padding(8)
+        };
+        displayGroup.Controls.Add(_displayGrid);
+        _runtimeBottomSplit.Panel2.Controls.Add(displayGroup);
+        _runtimeSplit.Panel2.Controls.Add(_runtimeBottomSplit);
+        runtimeGroup.Controls.Add(_runtimeSplit);
 
-        split.Panel1.Controls.Add(ruleGroup);
-        split.Panel2.Controls.Add(runtimeGroup);
-        return split;
+        _mainSplit.Panel1.Controls.Add(ruleGroup);
+        _mainSplit.Panel2.Controls.Add(runtimeGroup);
+        return _mainSplit;
     }
 
     private StatusStrip BuildStatusStrip()
@@ -494,6 +621,7 @@ public sealed class MainForm : Form
         _pollSecondsInput.ValueChanged += (_, _) =>
         {
             _monitorTimer.Interval = (int)_pollSecondsInput.Value * 1000;
+            ApplyPollingMode();
             MarkDirty();
         };
 
@@ -513,16 +641,41 @@ public sealed class MainForm : Form
             eventArgs.ThrowException = false;
             SetSaveStatus($"Input error: {eventArgs.Exception?.Message ?? "invalid value"}");
         };
+        _fullscreenGrid.CurrentCellDirtyStateChanged += (_, _) =>
+        {
+            if (_fullscreenGrid.IsCurrentCellDirty)
+            {
+                _fullscreenGrid.CommitEdit(DataGridViewDataErrorContexts.Commit);
+            }
+        };
+        _fullscreenGrid.CellValueChanged += (_, e) => HandleFullscreenIgnoreChanged(e.RowIndex, e.ColumnIndex);
         _pollSecondsInput.Leave += (_, _) => SaveIfDirtyOnFocusLost();
         Deactivate += (_, _) => SaveIfDirtyOnFocusLost();
         Resize += (_, _) =>
         {
-            if (WindowState == FormWindowState.Minimized && !_exitRequested)
+            if (WindowState == FormWindowState.Minimized && !_exitRequested && _minimizeToTrayCheck.Checked)
             {
                 MinimizeToTray();
             }
         };
-        Shown += (_, _) => ClearAllGridSelections();
+        Shown += (_, _) =>
+        {
+            ApplyWindowPlacementFromUserSettings();
+            ApplyDefaultOrSavedSplitLayoutSafely();
+            ClearAllGridSelections();
+        };
+        _mainSplit.SplitterMoved += (_, _) =>
+        {
+            MarkDirty();
+        };
+        _runtimeSplit.SplitterMoved += (_, _) =>
+        {
+            MarkDirty();
+        };
+        _runtimeBottomSplit.SplitterMoved += (_, _) =>
+        {
+            MarkDirty();
+        };
 
         _matchGrid.SelectionChanged += (_, _) => ClearPassiveGridSelection(_matchGrid);
         _displayGrid.SelectionChanged += (_, _) => ClearPassiveGridSelection(_displayGrid);
@@ -530,7 +683,7 @@ public sealed class MainForm : Form
 
         FormClosing += (sender, e) =>
         {
-            if (!_exitRequested && WindowState == FormWindowState.Minimized)
+            if (!_exitRequested && WindowState == FormWindowState.Minimized && _minimizeToTrayCheck.Checked)
             {
                 e.Cancel = true;
                 MinimizeToTray();
@@ -543,6 +696,7 @@ public sealed class MainForm : Form
             _trayIcon.Visible = false;
             _trayIcon.Dispose();
             _trayMenu.Dispose();
+            SaveWindowPlacementToUserSettings();
             if (_hasUnsavedChanges)
             {
                 SaveConfigurationToDisk(showSuccessMessage: false);
@@ -588,16 +742,18 @@ public sealed class MainForm : Form
 
     private void StartMonitoring()
     {
-        var eventStreamAvailable = EnsureProcessEventsStarted();
-        _monitorTimer.Start();
+        _eventStreamAvailable = EnsureProcessEventsStarted();
+        _monitoringActive = true;
+        ApplyPollingMode();
         _startButton.Enabled = false;
         _stopButton.Enabled = true;
-        SetMonitorStatus(eventStreamAvailable ? "Monitor: running" : "Monitor: running (polling fallback)");
+        SetMonitorStatus(GetMonitoringModeLabel());
         _ = RefreshSnapshotAsync();
     }
 
     private void StopMonitoring()
     {
+        _monitoringActive = false;
         _monitorTimer.Stop();
         _eventBurstTimer.Stop();
         _processEventMonitor.Stop();
@@ -617,7 +773,8 @@ public sealed class MainForm : Form
         try
         {
             var rules = BuildRulesFromUi(commitEdits: false);
-            var snapshot = await Task.Run(() => _monitorService.Evaluate(rules, _monitorAllFullscreenCheck.Checked));
+            var snapshot = await Task.Run(
+                () => _monitorService.Evaluate(rules, _monitorAllFullscreenCheck.Checked, _fullscreenIgnoreMap));
             ApplySnapshot(snapshot, rules.Count);
         }
         catch (Exception ex)
@@ -675,16 +832,29 @@ public sealed class MainForm : Form
         }
 
         _fullscreenRows.Clear();
+        _suppressFullscreenIgnoreEvents = true;
         foreach (var fullscreen in snapshot.FullscreenProcesses)
         {
+            if (fullscreen.IsDefaultIgnoreApplied &&
+                !_fullscreenIgnoreMap.ContainsKey(fullscreen.IgnoreKey))
+            {
+                _fullscreenIgnoreMap[fullscreen.IgnoreKey] = true;
+                MarkDirty();
+            }
+
             _fullscreenRows.Add(new FullscreenProcessRow
             {
                 ProcessId = fullscreen.ProcessId,
                 ProcessName = fullscreen.ProcessName,
+                ExecutablePath = fullscreen.ExecutablePath,
                 Display = fullscreen.Display,
-                MatchedByRule = fullscreen.MatchedByRule
+                MatchedByRule = fullscreen.MatchedByRule,
+                Ignore = ResolveIgnoreFromMap(fullscreen),
+                IgnoreKey = fullscreen.IgnoreKey,
+                IsDefaultIgnoreApplied = fullscreen.IsDefaultIgnoreApplied
             });
         }
+        _suppressFullscreenIgnoreEvents = false;
 
         _displayRows.Clear();
         foreach (var display in snapshot.Displays)
@@ -711,24 +881,26 @@ public sealed class MainForm : Form
         _snapshotLabel.Text =
             $"Last scan: {snapshot.CollectedAt:HH:mm:ss} | Processes: {snapshot.ProcessCount} | Matches: {snapshot.Matches.Count} | Fullscreen: {snapshot.FullscreenProcesses.Count}";
         var hdrSummary = BuildHdrSummary(snapshot.Displays);
+        var modeLabel = GetMonitoringModeLabel();
         if (activeRuleCount == 0)
         {
-            SetMonitorStatus($"Monitor: running (no rules configured) | {hdrSummary}");
+            SetMonitorStatus($"{modeLabel} (no rules configured) | {hdrSummary}");
             return;
         }
 
         if (snapshot.Matches.Count == 0)
         {
-            SetMonitorStatus($"Monitor: running (no matched processes) | {hdrSummary}");
+            SetMonitorStatus($"{modeLabel} (no matched processes) | {hdrSummary}");
             return;
         }
 
-        SetMonitorStatus($"Monitor: running ({snapshot.Matches.Count} match(es)) | {hdrSummary}");
+        SetMonitorStatus($"{modeLabel} ({snapshot.Matches.Count} match(es)) | {hdrSummary}");
     }
 
     private void LoadConfigurationFromDisk()
     {
         var loaded = TryLoadConfigurationResilient();
+        var addedDefaultIgnoreEntry = false;
         _suppressDirtyTracking = true;
         try
         {
@@ -745,10 +917,37 @@ public sealed class MainForm : Form
             }
 
             _pollSecondsInput.Value = pollSeconds;
+            _pollingEnabledCheck.Checked = loaded.PollingEnabled;
+            _minimizeToTrayCheck.Checked = loaded.MinimizeToTray;
             _monitorAllFullscreenCheck.Checked = loaded.MonitorAllFullscreenProcesses;
             _monitorTimer.Interval = pollSeconds * 1000;
-            _hasUnsavedChanges = false;
-            SetSaveStatus("Config: loaded");
+            ApplyPollingMode();
+            _fullscreenIgnoreMap.Clear();
+            foreach (var entry in loaded.FullscreenIgnoreMap)
+            {
+                _fullscreenIgnoreMap[entry.Key] = entry.Value;
+            }
+            foreach (var defaultIgnoreKey in ProcessMonitorService.DefaultIgnoreKeys)
+            {
+                if (_fullscreenIgnoreMap.ContainsKey(defaultIgnoreKey))
+                {
+                    continue;
+                }
+
+                _fullscreenIgnoreMap[defaultIgnoreKey] = true;
+                addedDefaultIgnoreEntry = true;
+            }
+            _loadedMainSplitterDistance = loaded.MainSplitterDistance;
+            _loadedRuntimeTopSplitterDistance = loaded.RuntimeTopSplitterDistance;
+            _loadedRuntimeBottomSplitterDistance = loaded.RuntimeBottomSplitterDistance;
+            if (IsHandleCreated)
+            {
+                ApplyDefaultOrSavedSplitLayoutSafely();
+            }
+            _hasUnsavedChanges = addedDefaultIgnoreEntry;
+            SetSaveStatus(addedDefaultIgnoreEntry
+                ? "Config: loaded (default fullscreen ignores added)"
+                : "Config: loaded");
             _ruleGrid.ClearSelection();
         }
         finally
@@ -821,7 +1020,13 @@ public sealed class MainForm : Form
             var config = new WatchConfiguration
             {
                 PollIntervalSeconds = (int)_pollSecondsInput.Value,
+                PollingEnabled = _pollingEnabledCheck.Checked,
+                MinimizeToTray = _minimizeToTrayCheck.Checked,
                 MonitorAllFullscreenProcesses = _monitorAllFullscreenCheck.Checked,
+                MainSplitterDistance = GetCurrentSplitterDistance(_mainSplit),
+                RuntimeTopSplitterDistance = GetCurrentSplitterDistance(_runtimeSplit),
+                RuntimeBottomSplitterDistance = GetCurrentSplitterDistance(_runtimeBottomSplit),
+                FullscreenIgnoreMap = new Dictionary<string, bool>(_fullscreenIgnoreMap, StringComparer.OrdinalIgnoreCase),
                 ProcessRules = BuildRulesFromUi(commitEdits: true)
             };
             WatchConfigurationLoader.SaveToFile(_configPath, config);
@@ -857,6 +1062,240 @@ public sealed class MainForm : Form
     private void SetSaveStatus(string text)
     {
         _saveStateLabel.Text = text;
+    }
+
+    private void ApplyPollingMode()
+    {
+        var shouldPoll = _monitoringActive && (_pollingEnabledCheck.Checked || !_eventStreamAvailable);
+        if (shouldPoll)
+        {
+            _monitorTimer.Start();
+        }
+        else
+        {
+            _monitorTimer.Stop();
+        }
+
+        _pollSecondsInput.Enabled = _pollingEnabledCheck.Checked;
+        _pollLabel.Enabled = _pollingEnabledCheck.Checked;
+    }
+
+    private string GetMonitoringModeLabel()
+    {
+        if (!_monitoringActive)
+        {
+            return "Monitor: stopped";
+        }
+
+        if (!_eventStreamAvailable)
+        {
+            return "Monitor: running (polling fallback)";
+        }
+
+        return _monitorTimer.Enabled
+            ? "Monitor: running (events + polling)"
+            : "Monitor: running (events only)";
+    }
+
+    private void ApplyWindowPlacementFromUserSettings()
+    {
+        if (!_windowSettings.HasBounds)
+        {
+            return;
+        }
+
+        if (_windowSettings.Width <= 0 || _windowSettings.Height <= 0)
+        {
+            return;
+        }
+
+        var loadedBounds = new Rectangle(
+            _windowSettings.X,
+            _windowSettings.Y,
+            _windowSettings.Width,
+            _windowSettings.Height);
+        var normalizedBounds = NormalizeWindowBoundsToVisibleArea(loadedBounds);
+        StartPosition = FormStartPosition.Manual;
+        Bounds = normalizedBounds;
+        if (_windowSettings.Maximized)
+        {
+            WindowState = FormWindowState.Maximized;
+        }
+    }
+
+    private void SaveWindowPlacementToUserSettings()
+    {
+        var bounds = GetPersistableWindowBounds();
+        if (bounds is null)
+        {
+            return;
+        }
+
+        _windowSettings.HasBounds = true;
+        _windowSettings.X = bounds.Value.X;
+        _windowSettings.Y = bounds.Value.Y;
+        _windowSettings.Width = bounds.Value.Width;
+        _windowSettings.Height = bounds.Value.Height;
+        _windowSettings.Maximized = WindowState == FormWindowState.Maximized;
+        _windowSettings.Save();
+    }
+
+    private Rectangle NormalizeWindowBoundsToVisibleArea(Rectangle bounds)
+    {
+        var primary = Screen.PrimaryScreen?.WorkingArea
+            ?? Screen.AllScreens.FirstOrDefault()?.WorkingArea
+            ?? new Rectangle(0, 0, 1200, 800);
+
+        var minWidth = Math.Max(MinimumSize.Width, 640);
+        var minHeight = Math.Max(MinimumSize.Height, 480);
+        var width = Math.Min(Math.Max(bounds.Width, minWidth), primary.Width);
+        var height = Math.Min(Math.Max(bounds.Height, minHeight), primary.Height);
+        var normalized = new Rectangle(bounds.X, bounds.Y, width, height);
+        var intersectsAnyScreen = Screen.AllScreens.Any(screen => screen.WorkingArea.IntersectsWith(normalized));
+        if (intersectsAnyScreen)
+        {
+            return normalized;
+        }
+
+        var centeredX = primary.Left + Math.Max(0, (primary.Width - width) / 2);
+        var centeredY = primary.Top + Math.Max(0, (primary.Height - height) / 2);
+        return new Rectangle(centeredX, centeredY, width, height);
+    }
+
+    private Rectangle? GetPersistableWindowBounds()
+    {
+        if (!IsHandleCreated || IsDisposed)
+        {
+            return null;
+        }
+
+        var bounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
+        if (bounds.Width <= 0 || bounds.Height <= 0)
+        {
+            return null;
+        }
+
+        return bounds;
+    }
+
+    private void ApplyDefaultOrSavedSplitLayout()
+    {
+        ApplySplitterDistanceSafe(
+            _mainSplit,
+            _loadedMainSplitterDistance ?? GetDefaultMainSplitterDistance(),
+            MainTopPanelMinSize,
+            MainBottomPanelMinSize);
+        var defaultBottomPanelHeight = GetTwoRowPanelHeight();
+        var defaultTopDistance = GetDefaultTopSplitterDistance(defaultBottomPanelHeight);
+        ApplySplitterDistanceSafe(
+            _runtimeSplit,
+            _loadedRuntimeTopSplitterDistance ?? defaultTopDistance,
+            RuntimeTopPanelMinSize,
+            RuntimeBottomPanelMinSize);
+        ApplySplitterDistanceSafe(
+            _runtimeBottomSplit,
+            _loadedRuntimeBottomSplitterDistance ?? defaultBottomPanelHeight,
+            RuntimeMiddlePanelMinSize,
+            RuntimeBottomSectionMinSize);
+    }
+
+    private void ApplyDefaultOrSavedSplitLayoutSafely()
+    {
+        var wasSuppressing = _suppressDirtyTracking;
+        _suppressDirtyTracking = true;
+        try
+        {
+            ApplyDefaultOrSavedSplitLayout();
+        }
+        finally
+        {
+            _suppressDirtyTracking = wasSuppressing;
+        }
+    }
+
+    private int GetDefaultTopSplitterDistance(int bottomPanelHeight)
+    {
+        var desiredBottom = (bottomPanelHeight * 2) + _runtimeBottomSplit.SplitterWidth + 24;
+        var fallback = _runtimeSplit.Height - desiredBottom;
+        return Math.Max(120, fallback);
+    }
+
+    private static int GetDefaultMainSplitterDistance()
+    {
+        return 260;
+    }
+
+    private static int GetTwoRowPanelHeight()
+    {
+        return 92;
+    }
+
+    private static int? GetCurrentSplitterDistance(SplitContainer split)
+    {
+        if (!split.IsHandleCreated || split.Width <= 0 || split.Height <= 0)
+        {
+            return null;
+        }
+
+        return split.SplitterDistance;
+    }
+
+    private static void ApplySplitterDistanceSafe(
+        SplitContainer split,
+        int distance,
+        int panel1MinSize,
+        int panel2MinSize)
+    {
+        var maxDistance = split.Orientation == Orientation.Horizontal
+            ? split.Height - panel2MinSize - split.SplitterWidth
+            : split.Width - panel2MinSize - split.SplitterWidth;
+        var minDistance = panel1MinSize;
+        if (maxDistance < minDistance)
+        {
+            return;
+        }
+
+        var clamped = Math.Max(minDistance, Math.Min(distance, maxDistance));
+        if (split.SplitterDistance != clamped)
+        {
+            split.SplitterDistance = clamped;
+        }
+    }
+
+    private void HandleFullscreenIgnoreChanged(int rowIndex, int columnIndex)
+    {
+        if (_suppressFullscreenIgnoreEvents || rowIndex < 0 || rowIndex >= _fullscreenRows.Count)
+        {
+            return;
+        }
+
+        var ignoreColumn = _fullscreenGrid.Columns
+            .Cast<DataGridViewColumn>()
+            .FirstOrDefault(static c => c.DataPropertyName == nameof(FullscreenProcessRow.Ignore));
+        if (ignoreColumn is null || columnIndex != ignoreColumn.Index)
+        {
+            return;
+        }
+
+        var row = _fullscreenRows[rowIndex];
+        if (string.IsNullOrWhiteSpace(row.IgnoreKey))
+        {
+            return;
+        }
+
+        _fullscreenIgnoreMap[row.IgnoreKey] = row.Ignore;
+        MarkDirty();
+        _ = RefreshSnapshotAsync();
+    }
+
+    private bool ResolveIgnoreFromMap(FullscreenProcessInfo info)
+    {
+        if (_fullscreenIgnoreMap.TryGetValue(info.IgnoreKey, out var ignored))
+        {
+            return ignored;
+        }
+
+        return info.IsIgnored;
     }
 
     private void MinimizeToTray()
@@ -986,7 +1425,7 @@ public sealed class MainForm : Form
 
     private void HandleProcessEventOnUiThread(ProcessEventNotification e)
     {
-        if (!_monitorTimer.Enabled || !ShouldReactToProcessEvent(e))
+        if (!_monitoringActive || !ShouldReactToProcessEvent(e))
         {
             return;
         }

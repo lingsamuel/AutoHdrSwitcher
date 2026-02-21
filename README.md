@@ -1,3 +1,10 @@
+[English](README.md) | [简体中文](README.zh-CN.md)
+
+## DISCLAIMER
+
+I know nothing about Windows-related APIs, GUI, or similar topics. This project was built with Codex, and it just works.
+Including this README, and this DISCLAIMER.
+
 # AutoHdrSwitcher
 
 Windows desktop app for process-rule configuration and live monitor status.
@@ -31,8 +38,14 @@ Default behavior:
 - App launches GUI (rules table + runtime status table).
 - If config file is missing, app auto-creates it (`config.json` in app directory by default).
 - If no rules are configured, app keeps running and shows status instead of exiting.
-- Runtime view shows both matched processes and per-display HDR state (`Supported`, `HDR On`, `Desired`, `Action`).
+- Polling is optional and disabled by default. App prefers process event stream for fast reaction.
+- `Minimize to tray` is enabled by default. When enabled, minimizing sends app to tray (removed from taskbar). Tray icon double-click restores window.
+- Runtime view shows matched processes, all fullscreen processes, and per-display HDR state (`Supported`, `HDR On`, `Desired`, `Action`).
 - Matched process table also shows `Fullscreen` (fullscreen/borderless-windowed heuristic).
+- Fullscreen table supports `Ignore` checkbox per process. Ignored entries do not affect auto-fullscreen HDR mode.
+- Ignore key uses executable path when available (`path:<fullpath>`), otherwise process name (`name:<processName>`).
+- Built-in default ignores include `pathprefix:C:\Windows\`, `name:TextInputHost`, and `name:dwm` (auto-generated in config when missing).
+- Runtime split layout is saved in config; window size/position/maximized state is saved with WinForms user settings.
 
 ## Rule Configuration
 
@@ -44,8 +57,14 @@ Fields per rule row:
 - `regexMode` (default off; when enabled, `exactMatch` and `caseSensitive` are ignored)
 - `enabled` (default on)
 
-Top-level config field:
+Top-level config fields:
 
 - `pollIntervalSeconds` (default 2)
+- `pollingEnabled` (default `false`)
+- `minimizeToTray` (default `true`)
+- `monitorAllFullscreenProcesses` (default `false`)
+- `mainSplitterDistance` (rules/runtime split)
+- `runtimeTopSplitterDistance` / `runtimeBottomSplitterDistance` (`null` = use built-in defaults, about 2 rows visible by default)
+- `fullscreenIgnoreMap` (dictionary of ignore key -> bool, supports `path:...`, `pathprefix:...`, `name:...`)
 
 Matching priority is documented in `docs/process-rule-matching.md`.

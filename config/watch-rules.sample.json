@@ -1,5 +1,16 @@
 {
   "pollIntervalSeconds": 2,
+  "pollingEnabled": false,
+  "minimizeToTray": true,
+  "monitorAllFullscreenProcesses": false,
+  "mainSplitterDistance": null,
+  "runtimeTopSplitterDistance": null,
+  "runtimeBottomSplitterDistance": null,
+  "fullscreenIgnoreMap": {
+    "pathprefix:C:\\Windows\\": true,
+    "name:TextInputHost": true,
+    "name:dwm": true
+  },
   "processRules": [
     {
       "pattern": "eldenring",

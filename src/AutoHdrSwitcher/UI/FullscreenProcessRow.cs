@@ -6,7 +6,15 @@ public sealed class FullscreenProcessRow
 
     public string ProcessName { get; init; } = string.Empty;
 
+    public string ExecutablePath { get; init; } = string.Empty;
+
     public string Display { get; init; } = string.Empty;
 
     public bool MatchedByRule { get; init; }
+
+    public bool Ignore { get; set; }
+
+    public string IgnoreKey { get; init; } = string.Empty;
+
+    public bool IsDefaultIgnoreApplied { get; init; }
 }
