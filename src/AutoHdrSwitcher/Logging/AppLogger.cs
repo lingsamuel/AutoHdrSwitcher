@@ -18,7 +18,7 @@ public static class AppLogger
         {
             _enabled = enabled;
             _initialized = true;
-            if (!clearOnStartup)
+            if (!clearOnStartup || !enabled)
             {
                 return;
             }
