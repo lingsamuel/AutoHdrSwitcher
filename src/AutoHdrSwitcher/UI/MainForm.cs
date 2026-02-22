@@ -39,6 +39,9 @@ public sealed class MainForm : Form
     private DataGridView _matchGrid = null!;
     private DataGridView _fullscreenGrid = null!;
     private DataGridView _displayGrid = null!;
+    private GroupBox _runtimeGroup = null!;
+    private GroupBox _fullscreenGroup = null!;
+    private GroupBox _displayGroup = null!;
     private Label _pollLabel = null!;
     private NumericUpDown _pollSecondsInput = null!;
     private CheckBox _pollingEnabledCheck = null!;
@@ -49,7 +52,6 @@ public sealed class MainForm : Form
     private ToolStripStatusLabel _snapshotLabel = null!;
     private ToolStripStatusLabel _saveStateLabel = null!;
     private ToolStripStatusLabel _configPathLabel = null!;
-    private ToolStripStatusLabel _eventSourceLabel = null!;
     private Button _startButton = null!;
     private Button _stopButton = null!;
     private NotifyIcon _trayIcon = null!;
@@ -354,9 +356,9 @@ public sealed class MainForm : Form
         });
         ruleGroup.Controls.Add(_ruleGrid);
 
-        var runtimeGroup = new GroupBox
+        _runtimeGroup = new GroupBox
         {
-            Text = "Runtime Status",
+            Text = "Runtime Status (Matches: 0)",
             Dock = DockStyle.Fill,
             Padding = new Padding(10)
         };
@@ -500,14 +502,14 @@ public sealed class MainForm : Form
             ReadOnly = false,
             Width = 85
         });
-        var fullscreenGroup = new GroupBox
+        _fullscreenGroup = new GroupBox
         {
-            Text = "Detected Fullscreen Processes",
+            Text = "Detected Fullscreen Processes (Fullscreen: 0)",
             Dock = DockStyle.Fill,
             Padding = new Padding(8)
         };
-        fullscreenGroup.Controls.Add(_fullscreenGrid);
-        _runtimeBottomSplit.Panel1.Controls.Add(fullscreenGroup);
+        _fullscreenGroup.Controls.Add(_fullscreenGrid);
+        _runtimeBottomSplit.Panel1.Controls.Add(_fullscreenGroup);
 
         _displayGrid = new DataGridView
         {
@@ -537,7 +539,7 @@ public sealed class MainForm : Form
             DataPropertyName = nameof(DisplayHdrRow.FriendlyName),
             ToolTipText = string.Empty,
             ReadOnly = true,
-            AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill
+            Width = 260
         });
         _displayGrid.Columns.Add(new DataGridViewCheckBoxColumn
         {
@@ -577,21 +579,22 @@ public sealed class MainForm : Form
             DataPropertyName = nameof(DisplayHdrRow.Action),
             ToolTipText = string.Empty,
             ReadOnly = true,
-            Width = 180
+            AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
+            MinimumWidth = 260
         });
-        var displayGroup = new GroupBox
+        _displayGroup = new GroupBox
         {
-            Text = "Display HDR Status",
+            Text = $"Display HDR Status ({BuildHdrSummary(Array.Empty<HdrDisplayStatus>())})",
             Dock = DockStyle.Fill,
             Padding = new Padding(8)
         };
-        displayGroup.Controls.Add(_displayGrid);
-        _runtimeBottomSplit.Panel2.Controls.Add(displayGroup);
+        _displayGroup.Controls.Add(_displayGrid);
+        _runtimeBottomSplit.Panel2.Controls.Add(_displayGroup);
         _runtimeSplit.Panel2.Controls.Add(_runtimeBottomSplit);
-        runtimeGroup.Controls.Add(_runtimeSplit);
+        _runtimeGroup.Controls.Add(_runtimeSplit);
 
         _mainSplit.Panel1.Controls.Add(ruleGroup);
-        _mainSplit.Panel2.Controls.Add(runtimeGroup);
+        _mainSplit.Panel2.Controls.Add(_runtimeGroup);
         return _mainSplit;
     }
 
@@ -606,7 +609,6 @@ public sealed class MainForm : Form
         _monitorStateLabel = new ToolStripStatusLabel("Monitor: starting...");
         _snapshotLabel = new ToolStripStatusLabel("Last scan: n/a");
         _saveStateLabel = new ToolStripStatusLabel("Config: clean");
-        _eventSourceLabel = new ToolStripStatusLabel("Event source: n/a");
         _configPathLabel = new ToolStripStatusLabel(_configPath);
 
         statusStrip.Items.Add(_monitorStateLabel);
@@ -614,8 +616,6 @@ public sealed class MainForm : Form
         statusStrip.Items.Add(_snapshotLabel);
         statusStrip.Items.Add(new ToolStripStatusLabel(" | "));
         statusStrip.Items.Add(_saveStateLabel);
-        statusStrip.Items.Add(new ToolStripStatusLabel(" | "));
-        statusStrip.Items.Add(_eventSourceLabel);
         statusStrip.Items.Add(new ToolStripStatusLabel(" | Config: "));
         statusStrip.Items.Add(_configPathLabel);
         return statusStrip;
@@ -821,7 +821,6 @@ public sealed class MainForm : Form
         _eventStreamAvailable = EnsureProcessEventsStarted();
         _monitoringActive = true;
         ApplyPollingMode();
-        UpdateEventSourceLabel();
         _startButton.Enabled = false;
         _stopButton.Enabled = true;
         SetMonitorStatus(GetMonitoringModeLabel());
@@ -836,8 +835,7 @@ public sealed class MainForm : Form
         _processEventMonitor.Stop();
         _startButton.Enabled = true;
         _stopButton.Enabled = false;
-        UpdateEventSourceLabel();
-        SetMonitorStatus("Monitor: stopped");
+        SetMonitorStatus(GetMonitoringModeLabel());
         _ = RefreshDisplaySnapshotAsync();
     }
 
@@ -884,8 +882,10 @@ public sealed class MainForm : Form
             var displays = await Task.Run(() => _monitorService.GetLiveDisplayHdrStates(_displayAutoModes));
             ApplyDisplayRows(displays);
             ClearPassiveGridSelection(_displayGrid);
+            var hdrSummary = BuildHdrSummary(displays);
+            _displayGroup.Text = $"Display HDR Status ({hdrSummary})";
             _snapshotLabel.Text = $"Last display refresh: {DateTimeOffset.Now:HH:mm:ss}";
-            SetMonitorStatus($"{GetMonitoringModeLabel()} | {BuildHdrSummary(displays)}");
+            SetMonitorStatus($"{GetMonitoringModeLabel()} | {hdrSummary}");
         }
         catch (Exception ex)
         {
@@ -980,9 +980,11 @@ public sealed class MainForm : Form
             _ruleGrid.ClearSelection();
         }
 
-        _snapshotLabel.Text =
-            $"Last scan: {snapshot.CollectedAt:HH:mm:ss} | Processes: {snapshot.ProcessCount} | Matches: {snapshot.Matches.Count} | Fullscreen: {snapshot.FullscreenProcesses.Count}";
+        _runtimeGroup.Text = $"Runtime Status (Matches: {snapshot.Matches.Count})";
+        _fullscreenGroup.Text = $"Detected Fullscreen Processes (Fullscreen: {snapshot.FullscreenProcesses.Count})";
         var hdrSummary = BuildHdrSummary(snapshot.Displays);
+        _displayGroup.Text = $"Display HDR Status ({hdrSummary})";
+        _snapshotLabel.Text = $"Last scan: {snapshot.CollectedAt:HH:mm:ss} | Processes: {snapshot.ProcessCount}";
         var modeLabel = GetMonitoringModeLabel();
         if (activeRuleCount == 0)
         {
@@ -990,13 +992,9 @@ public sealed class MainForm : Form
             return;
         }
 
-        if (snapshot.Matches.Count == 0)
-        {
-            SetMonitorStatus($"{modeLabel} (no matched processes) | {hdrSummary}");
-            return;
-        }
-
-        SetMonitorStatus($"{modeLabel} ({snapshot.Matches.Count} match(es)) | {hdrSummary}");
+        SetMonitorStatus(snapshot.Matches.Count == 0
+            ? $"{modeLabel} | {hdrSummary}"
+            : $"{modeLabel} ({snapshot.Matches.Count} match(es)) | {hdrSummary}");
     }
 
     private void ApplyDisplayRows(IReadOnlyList<HdrDisplayStatus> displays)
@@ -1210,13 +1208,13 @@ public sealed class MainForm : Form
         _saveStateLabel.Text = text;
     }
 
-    private void UpdateEventSourceLabel()
+    private string GetEventSourceLabel()
     {
-        _eventSourceLabel.Text = _processEventMonitor.CurrentMode switch
+        return _processEventMonitor.CurrentMode switch
         {
-            ProcessEventStreamMode.Trace => "Event source: trace",
-            ProcessEventStreamMode.Instance => "Event source: instance (fallback)",
-            _ => _monitoringActive ? "Event source: unavailable" : "Event source: stopped"
+            ProcessEventStreamMode.Trace => "trace",
+            ProcessEventStreamMode.Instance => "instance",
+            _ => "unknown"
         };
     }
 
@@ -1267,9 +1265,10 @@ public sealed class MainForm : Form
                 : "Monitor: running (event stream unavailable)";
         }
 
+        var eventSource = GetEventSourceLabel();
         return _monitorTimer.Enabled
-            ? "Monitor: running (events + polling)"
-            : "Monitor: running (events only)";
+            ? $"Monitor: running ({eventSource} events + polling)"
+            : $"Monitor: running ({eventSource} events)";
     }
 
     private void ApplyWindowPlacementFromUserSettings()
@@ -1726,7 +1725,6 @@ public sealed class MainForm : Form
         }
 
         ApplyPollingMode();
-        UpdateEventSourceLabel();
         SetMonitorStatus(GetMonitoringModeLabel());
     }
 
