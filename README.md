@@ -45,6 +45,7 @@ Default behavior:
 - `HDR On` in display table is directly editable for manual HDR on/off per display.
 - Display HDR status keeps refreshing live even when monitor is stopped.
 - `Switch all displays together` can be enabled to ignore per-display mapping and toggle HDR on/off for all displays at once.
+- Non-user cache (`cache.json` in app current directory) stores observed display windows for matched/fullscreen apps. Cache uses extensible top-level sections (currently `displayWindowPrediction`) so future cache modules can be added safely. If a matched app has no window yet, app first uses cache prediction; if no prediction exists, app enables all auto-controlled displays until real window is resolved.
 - Matched process table also shows `Fullscreen` (fullscreen/borderless-windowed heuristic).
 - Fullscreen table supports `Ignore` checkbox per process. Ignored entries do not affect auto-fullscreen HDR mode.
 - Ignore key uses executable path when available (`path:<fullpath>`), otherwise process name (`name:<processName>`).

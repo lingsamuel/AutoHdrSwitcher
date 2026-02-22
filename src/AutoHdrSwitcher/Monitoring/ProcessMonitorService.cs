@@ -21,6 +21,7 @@ public sealed class ProcessMonitorService
 
     private readonly ProcessDisplayResolver _displayResolver = new();
     private readonly HdrController _hdrController = new();
+    private readonly DisplayWindowPredictionCache _displayPredictionCache = new();
 
     public static string DefaultWindowsPathPrefixIgnoreKey { get; } =
         BuildPathPrefixIgnoreKey(DefaultWindowsPathPrefix);
@@ -46,7 +47,7 @@ public sealed class ProcessMonitorService
         var matchedDisplays = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var processNames = new Dictionary<int, string>();
         var processPaths = new Dictionary<int, string>();
-        _ = _displayResolver.TryGetPrimaryDisplay(out var primaryDisplay);
+        var enableAllDisplaysByPredictionFallback = false;
 
         foreach (var process in processArray)
         {
@@ -57,10 +58,13 @@ public sealed class ProcessMonitorService
                     var processId = process.Id;
                     var safeName = SafeProcessName(process);
                     processNames[processId] = safeName;
-                    if (TryGetExecutablePath(process, out var executablePath))
+                    string? executablePath = null;
+                    if (TryGetExecutablePath(process, out var discoveredPath))
                     {
-                        processPaths[processId] = executablePath;
+                        executablePath = discoveredPath;
+                        processPaths[processId] = discoveredPath;
                     }
+                    var predictionKeys = BuildPredictionKeys(safeName, executablePath);
 
                     foreach (var candidate in BuildCandidates(process))
                     {
@@ -80,10 +84,27 @@ public sealed class ProcessMonitorService
                             matchedDisplays,
                             out var isFullscreenLike,
                             out var hasResolvedDisplay);
-                        if (!hasResolvedDisplay && !string.IsNullOrWhiteSpace(primaryDisplay))
+                        if (hasResolvedDisplay)
                         {
-                            matchedDisplays.Add(primaryDisplay);
-                            display = $"(pending -> primary {primaryDisplay})";
+                            _displayPredictionCache.RecordDisplay(predictionKeys, display);
+                        }
+                        else
+                        {
+                            var predictedDisplays = _displayPredictionCache.GetPredictedDisplays(predictionKeys);
+                            if (predictedDisplays.Count > 0)
+                            {
+                                foreach (var predictedDisplay in predictedDisplays)
+                                {
+                                    matchedDisplays.Add(predictedDisplay);
+                                }
+
+                                display = $"(pending -> predicted {string.Join(", ", predictedDisplays)})";
+                            }
+                            else
+                            {
+                                display = "(pending -> all displays)";
+                                enableAllDisplaysByPredictionFallback = true;
+                            }
                         }
 
                         matches.Add(new ProcessMatchResult
@@ -116,6 +137,9 @@ public sealed class ProcessMonitorService
                 ? safeName
                 : $"PID-{window.ProcessId}";
             _ = processPaths.TryGetValue(window.ProcessId, out var executablePath);
+            _displayPredictionCache.RecordDisplay(
+                BuildPredictionKeys(name, executablePath),
+                window.GdiDeviceName);
             ResolveIgnoreState(
                 name,
                 executablePath,
@@ -145,7 +169,8 @@ public sealed class ProcessMonitorService
         var displayStatuses = EvaluateDisplayHdrStates(
             matchedDisplays,
             switchAllDisplaysTogether,
-            displayAutoModes);
+            displayAutoModes,
+            enableAllDisplaysByPredictionFallback);
         matches.Sort(static (a, b) => a.ProcessName.CompareTo(b.ProcessName));
         fullscreenProcesses.Sort(static (a, b) =>
         {
@@ -165,6 +190,11 @@ public sealed class ProcessMonitorService
             FullscreenProcesses = fullscreenProcesses,
             Displays = displayStatuses
         };
+    }
+
+    public void FlushPredictionCache()
+    {
+        _displayPredictionCache.Flush();
     }
 
     public IReadOnlyList<HdrDisplayStatus> GetLiveDisplayHdrStates(
@@ -332,7 +362,8 @@ public sealed class ProcessMonitorService
     private List<HdrDisplayStatus> EvaluateDisplayHdrStates(
         HashSet<string> matchedDisplays,
         bool switchAllDisplaysTogether,
-        IReadOnlyDictionary<string, bool> displayAutoModes)
+        IReadOnlyDictionary<string, bool> displayAutoModes,
+        bool enableAllDisplaysByPredictionFallback)
     {
         var statuses = new List<HdrDisplayStatus>();
         var displays = _hdrController.GetDisplays();
@@ -342,10 +373,15 @@ public sealed class ProcessMonitorService
         {
             var isAuto = ResolveDisplayAutoMode(display.GdiDeviceName, displayAutoModes);
             var desired = isAuto
-                ? display.IsHdrSupported && (desiredForAllDisplays || matchedDisplays.Contains(display.GdiDeviceName))
+                ? display.IsHdrSupported &&
+                    (enableAllDisplaysByPredictionFallback ||
+                     desiredForAllDisplays ||
+                     matchedDisplays.Contains(display.GdiDeviceName))
                 : display.IsHdrEnabled;
             var hdrEnabled = display.IsHdrEnabled;
-            var action = isAuto ? "No change (Auto=true)" : "Skipped auto control (Auto=false)";
+            var action = isAuto
+                ? (enableAllDisplaysByPredictionFallback ? "No change (fallback all displays)" : "No change (Auto=true)")
+                : "Skipped auto control (Auto=false)";
 
             if (!display.IsHdrSupported)
             {
@@ -391,7 +427,9 @@ public sealed class ProcessMonitorService
                 IsHdrSupported = false,
                 IsHdrEnabled = false,
                 DesiredHdrEnabled = ResolveDisplayAutoMode(screen.DeviceName, displayAutoModes) &&
-                    (desiredForAllDisplays || matchedDisplays.Contains(screen.DeviceName)),
+                    (enableAllDisplaysByPredictionFallback ||
+                     desiredForAllDisplays ||
+                     matchedDisplays.Contains(screen.DeviceName)),
                 LastAction = "Display detected; HDR state unavailable"
             });
         }
@@ -405,6 +443,27 @@ public sealed class ProcessMonitorService
         IReadOnlyDictionary<string, bool> displayAutoModes)
     {
         return !displayAutoModes.TryGetValue(displayName, out var autoMode) || autoMode;
+    }
+
+    private static IReadOnlyList<string> BuildPredictionKeys(string processName, string? executablePath)
+    {
+        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var normalizedName = processName.Trim();
+        if (!string.IsNullOrWhiteSpace(normalizedName) &&
+            !normalizedName.StartsWith("PID-", StringComparison.OrdinalIgnoreCase) &&
+            !normalizedName.StartsWith("<", StringComparison.Ordinal))
+        {
+            keys.Add($"name:{normalizedName}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(executablePath))
+        {
+            var normalizedPath = NormalizePath(executablePath);
+            keys.Add($"path:{normalizedPath}");
+        }
+
+        return keys.ToArray();
     }
 
     private static bool TryGetExecutablePath(Process process, out string executablePath)

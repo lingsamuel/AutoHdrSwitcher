@@ -760,6 +760,7 @@ public sealed class MainForm : Form
             _displayRefreshTimer.Stop();
             _processEventMonitor.Stop();
             _processEventMonitor.Dispose();
+            _monitorService.FlushPredictionCache();
             _trayIcon.Visible = false;
             _trayIcon.Dispose();
             _trayMenu.Dispose();

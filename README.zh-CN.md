@@ -44,6 +44,7 @@ dotnet.exe run --project src/AutoHdrSwitcher -- --config C:\path\to\config.json
 - 显示器表格中的 `HDR On` 支持直接勾选/取消，手动切换对应显示器 HDR。
 - 即使监听已停止，显示器 HDR 状态也会持续实时刷新。
 - 可开启 `Switch all displays together`，忽略具体显示器映射，在有命中时统一开启所有显示器 HDR、无命中时统一关闭。
+- 内部会维护非用户配置缓存（当前目录下 `cache.json`），记录命中/全屏应用的历史窗口显示器。缓存采用可扩展的顶层分区结构（当前使用 `displayWindowPrediction`），后续可追加其他缓存模块。命中进程暂时无窗口时先用缓存预测；若无缓存则临时开启所有 `Auto=true` 显示器，待真实窗口出现后再自动收敛。
 - 命中进程表还会显示 `Fullscreen`（全屏/无边框窗口启发式判断）。
 - 全屏表支持对每个进程勾选 `Ignore`。被忽略的条目不会影响自动全屏 HDR 模式。
 - Ignore 键优先使用可执行文件路径（`path:<fullpath>`），否则使用进程名（`name:<processName>`）。
