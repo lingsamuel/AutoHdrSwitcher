@@ -155,7 +155,7 @@ public sealed class ProcessMonitorService
                 MatchedByRule = matchedByRule
             });
 
-            if (monitorAllFullscreenProcesses && !isIgnored)
+            if (monitorAllFullscreenProcesses && !isIgnored && !matchedByRule)
             {
                 matchedDisplays.Add(window.GdiDeviceName);
             }
