@@ -1,5 +1,8 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Drawing.Drawing2D;
+using System.Globalization;
+using System.Runtime.InteropServices;
 using AutoHdrSwitcher.Config;
 using AutoHdrSwitcher.Logging;
 using AutoHdrSwitcher.Matching;
@@ -70,6 +73,8 @@ public sealed class MainForm : Form
     private Button _stopButton = null!;
     private NotifyIcon _trayIcon = null!;
     private ContextMenuStrip _trayMenu = null!;
+    private Icon _trayBaseIcon = null!;
+    private Icon? _trayBadgeIcon;
 
     private bool _suppressDirtyTracking;
     private bool _suppressFullscreenIgnoreEvents;
@@ -86,6 +91,8 @@ public sealed class MainForm : Form
     private bool _eventStreamAvailable;
     private bool _exitRequested;
     private bool _isHiddenToTray;
+    private bool _ownsTrayBaseIcon;
+    private int _lastTrayMatchCount = -1;
     private long _snapshotRequestSequence;
     private int? _loadedMainSplitterDistance;
     private int? _loadedRuntimeTopSplitterDistance;
@@ -153,6 +160,9 @@ public sealed class MainForm : Form
             return null;
         }
     }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool DestroyIcon(nint hIcon);
 
     private TableLayoutPanel BuildTopPanel()
     {
@@ -721,6 +731,10 @@ public sealed class MainForm : Form
 
     private void InitializeTrayIcon()
     {
+        var clonedIcon = CloneAppIcon();
+        _trayBaseIcon = clonedIcon ?? SystemIcons.Application;
+        _ownsTrayBaseIcon = clonedIcon is not null;
+
         _trayMenu = new ContextMenuStrip();
         var openItem = new ToolStripMenuItem("Open");
         openItem.Click += (_, _) => RestoreFromTray();
@@ -736,7 +750,7 @@ public sealed class MainForm : Form
 
         _trayIcon = new NotifyIcon
         {
-            Icon = CloneAppIcon() ?? SystemIcons.Application,
+            Icon = _trayBaseIcon,
             Text = "AutoHdrSwitcher",
             Visible = true,
             ContextMenuStrip = _trayMenu
@@ -756,6 +770,8 @@ public sealed class MainForm : Form
 
             MinimizeToTray();
         };
+
+        UpdateTrayMatchIndicator(0);
     }
 
     private void WireUpEvents()
@@ -924,6 +940,12 @@ public sealed class MainForm : Form
             _processEventMonitor.Dispose();
             _trayIcon.Visible = false;
             _trayIcon.Dispose();
+            _trayBadgeIcon?.Dispose();
+            _trayBadgeIcon = null;
+            if (_ownsTrayBaseIcon)
+            {
+                _trayBaseIcon.Dispose();
+            }
             _trayMenu.Dispose();
             SaveWindowPlacementToUserSettings();
             if (_hasUnsavedChanges)
@@ -1178,6 +1200,7 @@ public sealed class MainForm : Form
             _ruleGrid.ClearSelection();
         }
 
+        UpdateTrayMatchIndicator(snapshot.Matches.Count);
         _runtimeGroup.Text = $"Runtime Status (Matches: {snapshot.Matches.Count})";
         _fullscreenGroup.Text = $"Detected Fullscreen Processes (Fullscreen: {snapshot.FullscreenProcesses.Count})";
         var hdrSummary = BuildHdrSummary(snapshot.Displays);
@@ -2110,6 +2133,112 @@ public sealed class MainForm : Form
         Show();
         WindowState = FormWindowState.Normal;
         Activate();
+    }
+
+    private void UpdateTrayMatchIndicator(int matchCount)
+    {
+        var normalizedCount = Math.Max(0, matchCount);
+        if (normalizedCount == _lastTrayMatchCount)
+        {
+            return;
+        }
+
+        var trayText = normalizedCount == 0
+            ? "AutoHdrSwitcher"
+            : $"AutoHdrSwitcher ({normalizedCount} match(es))";
+        _trayIcon.Text = trayText.Length <= 63
+            ? trayText
+            : trayText[..63];
+
+        if (normalizedCount == 0)
+        {
+            _trayIcon.Icon = _trayBaseIcon;
+            _trayBadgeIcon?.Dispose();
+            _trayBadgeIcon = null;
+            _lastTrayMatchCount = normalizedCount;
+            return;
+        }
+
+        using var badgeBitmap = BuildTrayBadgeBitmap(normalizedCount);
+        var badgeIcon = CreateIconFromBitmap(badgeBitmap);
+        if (badgeIcon is null)
+        {
+            return;
+        }
+
+        _trayIcon.Icon = badgeIcon;
+        _trayBadgeIcon?.Dispose();
+        _trayBadgeIcon = badgeIcon;
+        _lastTrayMatchCount = normalizedCount;
+    }
+
+    private Bitmap BuildTrayBadgeBitmap(int matchCount)
+    {
+        var iconSize = SystemInformation.SmallIconSize;
+        var bitmap = new Bitmap(iconSize.Width, iconSize.Height);
+
+        using var graphics = Graphics.FromImage(bitmap);
+        graphics.Clear(Color.Transparent);
+        graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
+        graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+        graphics.DrawIcon(_trayBaseIcon, new Rectangle(Point.Empty, iconSize));
+
+        var badgeDiameter = Math.Max(10, Math.Min(iconSize.Width, iconSize.Height) - 5);
+        var badgeRect = new Rectangle(
+            iconSize.Width - badgeDiameter,
+            iconSize.Height - badgeDiameter,
+            badgeDiameter,
+            badgeDiameter);
+
+        using var badgeBrush = new SolidBrush(Color.FromArgb(230, 214, 46, 46));
+        using var badgeOutline = new Pen(Color.White, 1F);
+        using var badgeTextBrush = new SolidBrush(Color.White);
+        using var textLayout = new StringFormat
+        {
+            Alignment = StringAlignment.Center,
+            LineAlignment = StringAlignment.Center,
+            FormatFlags = StringFormatFlags.NoWrap
+        };
+
+        graphics.FillEllipse(badgeBrush, badgeRect);
+        graphics.DrawEllipse(badgeOutline, badgeRect);
+
+        var badgeText = matchCount > 99
+            ? "99+"
+            : matchCount.ToString(CultureInfo.InvariantCulture);
+        var fontSize = badgeText.Length switch
+        {
+            1 => 8F,
+            2 => 7F,
+            _ => 5.5F
+        };
+        using var font = new Font("Segoe UI", fontSize, FontStyle.Bold, GraphicsUnit.Pixel);
+        graphics.DrawString(badgeText, font, badgeTextBrush, badgeRect, textLayout);
+
+        return bitmap;
+    }
+
+    private static Icon? CreateIconFromBitmap(Bitmap bitmap)
+    {
+        nint iconHandle = IntPtr.Zero;
+        try
+        {
+            iconHandle = bitmap.GetHicon();
+            using var icon = Icon.FromHandle(iconHandle);
+            return (Icon)icon.Clone();
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            if (iconHandle != IntPtr.Zero)
+            {
+                _ = DestroyIcon(iconHandle);
+            }
+        }
     }
 
     private void ClearAllGridSelections()
