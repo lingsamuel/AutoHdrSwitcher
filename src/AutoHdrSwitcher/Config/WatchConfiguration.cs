@@ -11,7 +11,7 @@ public sealed class WatchConfiguration
 
     public bool MinimizeToTray { get; init; } = true;
 
-    public bool EnableLogging { get; init; } = true;
+    public bool EnableLogging { get; init; }
 
     public bool AutoRequestAdminForTrace { get; init; }
 

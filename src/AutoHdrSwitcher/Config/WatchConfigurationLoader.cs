@@ -72,7 +72,7 @@ public static class WatchConfigurationLoader
     {
         var options = new StartupOptions(
             AutoRequestAdminForTrace: false,
-            EnableLogging: true);
+            EnableLogging: false);
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
         {
             return options;
