@@ -85,6 +85,7 @@ public sealed class MainForm : Form
     private bool _monitoringActive;
     private bool _eventStreamAvailable;
     private bool _exitRequested;
+    private bool _isHiddenToTray;
     private long _snapshotRequestSequence;
     private int? _loadedMainSplitterDistance;
     private int? _loadedRuntimeTopSplitterDistance;
@@ -737,10 +738,24 @@ public sealed class MainForm : Form
         {
             Icon = CloneAppIcon() ?? SystemIcons.Application,
             Text = "AutoHdrSwitcher",
-            Visible = false,
+            Visible = true,
             ContextMenuStrip = _trayMenu
         };
-        _trayIcon.DoubleClick += (_, _) => RestoreFromTray();
+        _trayIcon.MouseClick += (_, eventArgs) =>
+        {
+            if (eventArgs.Button != MouseButtons.Left)
+            {
+                return;
+            }
+
+            if (_isHiddenToTray)
+            {
+                RestoreFromTray();
+                return;
+            }
+
+            MinimizeToTray();
+        };
     }
 
     private void WireUpEvents()
@@ -841,7 +856,13 @@ public sealed class MainForm : Form
             SetMonitorStatus($"Display HDR input error: {eventArgs.Exception?.Message ?? "invalid value"}");
         };
         _pollSecondsInput.Leave += (_, _) => SaveIfDirtyOnFocusLost();
-        Deactivate += (_, _) => SaveIfDirtyOnFocusLost();
+        Deactivate += (_, _) =>
+        {
+            if (!_isHiddenToTray)
+            {
+                SaveIfDirtyOnFocusLost();
+            }
+        };
         Resize += (_, _) =>
         {
             if (WindowState == FormWindowState.Minimized && !_exitRequested)
@@ -880,14 +901,20 @@ public sealed class MainForm : Form
         _displayGrid.SelectionChanged += (_, _) => ClearPassiveGridSelection(_displayGrid);
         _fullscreenGrid.SelectionChanged += (_, _) => ClearPassiveGridSelection(_fullscreenGrid);
 
-        FormClosing += (sender, e) =>
+        FormClosing += (_, e) =>
         {
             if (!_exitRequested &&
                 _minimizeToTrayCheck.Checked &&
                 e.CloseReason == CloseReason.UserClosing)
             {
                 e.Cancel = true;
-                MinimizeToTray();
+                BeginInvoke(new Action(() =>
+                {
+                    if (!IsDisposed && IsHandleCreated)
+                    {
+                        MinimizeToTray();
+                    }
+                }));
                 return;
             }
 
@@ -2061,14 +2088,14 @@ public sealed class MainForm : Form
 
     private void MinimizeToTray()
     {
-        if (_trayIcon.Visible)
+        if (!IsHandleCreated || IsDisposed)
         {
             return;
         }
 
-        _trayIcon.Visible = true;
-        ShowInTaskbar = false;
+        _isHiddenToTray = true;
         Hide();
+        ShowInTaskbar = false;
     }
 
     private void RestoreFromTray()
@@ -2078,11 +2105,11 @@ public sealed class MainForm : Form
             return;
         }
 
-        Show();
+        _isHiddenToTray = false;
         ShowInTaskbar = true;
+        Show();
         WindowState = FormWindowState.Normal;
         Activate();
-        _trayIcon.Visible = false;
     }
 
     private void ClearAllGridSelections()

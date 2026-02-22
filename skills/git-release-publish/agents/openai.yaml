@@ -1,0 +1,4 @@
+interface:
+  display_name: "Git Release Publish"
+  short_description: "Bump version, commit, tag, and push release."
+  default_prompt: "Bump project version, create a release commit, add an annotated tag, and push branch and tag to origin."
