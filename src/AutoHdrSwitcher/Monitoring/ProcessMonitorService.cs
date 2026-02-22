@@ -30,10 +30,13 @@ public sealed class ProcessMonitorService
     public ProcessMonitorSnapshot Evaluate(
         IReadOnlyCollection<ProcessWatchRule> rules,
         bool monitorAllFullscreenProcesses,
-        IReadOnlyDictionary<string, bool> fullscreenIgnoreMap)
+        IReadOnlyDictionary<string, bool> fullscreenIgnoreMap,
+        bool switchAllDisplaysTogether,
+        IReadOnlyDictionary<string, bool> displayAutoModes)
     {
         ArgumentNullException.ThrowIfNull(rules);
         ArgumentNullException.ThrowIfNull(fullscreenIgnoreMap);
+        ArgumentNullException.ThrowIfNull(displayAutoModes);
 
         var processArray = Process.GetProcesses();
         var resolvedWindows = _displayResolver.CaptureProcessWindows();
@@ -139,7 +142,10 @@ public sealed class ProcessMonitorService
             }
         }
 
-        var displayStatuses = EvaluateDisplayHdrStates(matchedDisplays);
+        var displayStatuses = EvaluateDisplayHdrStates(
+            matchedDisplays,
+            switchAllDisplaysTogether,
+            displayAutoModes);
         matches.Sort(static (a, b) => a.ProcessName.CompareTo(b.ProcessName));
         fullscreenProcesses.Sort(static (a, b) =>
         {
@@ -159,6 +165,83 @@ public sealed class ProcessMonitorService
             FullscreenProcesses = fullscreenProcesses,
             Displays = displayStatuses
         };
+    }
+
+    public IReadOnlyList<HdrDisplayStatus> GetLiveDisplayHdrStates(
+        IReadOnlyDictionary<string, bool> displayAutoModes)
+    {
+        ArgumentNullException.ThrowIfNull(displayAutoModes);
+        var statuses = new List<HdrDisplayStatus>();
+        var displays = _hdrController.GetDisplays();
+        var coveredDisplays = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var display in displays)
+        {
+            var isAuto = ResolveDisplayAutoMode(display.GdiDeviceName, displayAutoModes);
+            statuses.Add(new HdrDisplayStatus
+            {
+                Display = display.GdiDeviceName,
+                FriendlyName = display.FriendlyName,
+                IsHdrSupported = display.IsHdrSupported,
+                IsHdrEnabled = display.IsHdrEnabled,
+                DesiredHdrEnabled = display.IsHdrEnabled,
+                LastAction = display.IsHdrSupported
+                    ? $"Live status refreshed (Auto={isAuto})"
+                    : "HDR unsupported"
+            });
+            coveredDisplays.Add(display.GdiDeviceName);
+        }
+
+        foreach (var screen in Screen.AllScreens)
+        {
+            if (!coveredDisplays.Add(screen.DeviceName))
+            {
+                continue;
+            }
+
+            statuses.Add(new HdrDisplayStatus
+            {
+                Display = screen.DeviceName,
+                FriendlyName = screen.Primary ? $"{screen.DeviceName} (Primary)" : screen.DeviceName,
+                IsHdrSupported = false,
+                IsHdrEnabled = false,
+                DesiredHdrEnabled = false,
+                LastAction = "Display detected; HDR state unavailable"
+            });
+        }
+
+        statuses.Sort(static (a, b) => string.Compare(a.Display, b.Display, StringComparison.OrdinalIgnoreCase));
+        return statuses;
+    }
+
+    public bool TrySetDisplayHdr(string gdiDisplayName, bool enable, out string message)
+    {
+        if (string.IsNullOrWhiteSpace(gdiDisplayName))
+        {
+            message = "Display name is required";
+            return false;
+        }
+
+        var display = _hdrController.GetDisplays().FirstOrDefault(
+            d => string.Equals(d.GdiDeviceName, gdiDisplayName, StringComparison.OrdinalIgnoreCase));
+        if (display is null)
+        {
+            message = $"Display not found: {gdiDisplayName}";
+            return false;
+        }
+
+        if (!display.IsHdrSupported)
+        {
+            message = "HDR unsupported";
+            return false;
+        }
+
+        if (display.IsHdrEnabled == enable)
+        {
+            message = enable ? "HDR already enabled" : "HDR already disabled";
+            return true;
+        }
+
+        return _hdrController.TrySetHdr(display, enable, out message);
     }
 
     private static IEnumerable<string> BuildCandidates(Process process)
@@ -246,22 +329,29 @@ public sealed class ProcessMonitorService
         return gdiName;
     }
 
-    private List<HdrDisplayStatus> EvaluateDisplayHdrStates(HashSet<string> matchedDisplays)
+    private List<HdrDisplayStatus> EvaluateDisplayHdrStates(
+        HashSet<string> matchedDisplays,
+        bool switchAllDisplaysTogether,
+        IReadOnlyDictionary<string, bool> displayAutoModes)
     {
         var statuses = new List<HdrDisplayStatus>();
         var displays = _hdrController.GetDisplays();
         var coveredDisplays = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var desiredForAllDisplays = switchAllDisplaysTogether && matchedDisplays.Count > 0;
         foreach (var display in displays)
         {
-            var desired = display.IsHdrSupported && matchedDisplays.Contains(display.GdiDeviceName);
+            var isAuto = ResolveDisplayAutoMode(display.GdiDeviceName, displayAutoModes);
+            var desired = isAuto
+                ? display.IsHdrSupported && (desiredForAllDisplays || matchedDisplays.Contains(display.GdiDeviceName))
+                : display.IsHdrEnabled;
             var hdrEnabled = display.IsHdrEnabled;
-            var action = "No change";
+            var action = isAuto ? "No change (Auto=true)" : "Skipped auto control (Auto=false)";
 
             if (!display.IsHdrSupported)
             {
                 action = "HDR unsupported";
             }
-            else if (display.IsHdrEnabled != desired)
+            else if (isAuto && display.IsHdrEnabled != desired)
             {
                 if (_hdrController.TrySetHdr(display, desired, out var actionText))
                 {
@@ -300,13 +390,21 @@ public sealed class ProcessMonitorService
                 FriendlyName = screen.Primary ? $"{screen.DeviceName} (Primary)" : screen.DeviceName,
                 IsHdrSupported = false,
                 IsHdrEnabled = false,
-                DesiredHdrEnabled = matchedDisplays.Contains(screen.DeviceName),
+                DesiredHdrEnabled = ResolveDisplayAutoMode(screen.DeviceName, displayAutoModes) &&
+                    (desiredForAllDisplays || matchedDisplays.Contains(screen.DeviceName)),
                 LastAction = "Display detected; HDR state unavailable"
             });
         }
 
         statuses.Sort(static (a, b) => string.Compare(a.Display, b.Display, StringComparison.OrdinalIgnoreCase));
         return statuses;
+    }
+
+    private static bool ResolveDisplayAutoMode(
+        string displayName,
+        IReadOnlyDictionary<string, bool> displayAutoModes)
+    {
+        return !displayAutoModes.TryGetValue(displayName, out var autoMode) || autoMode;
     }
 
     private static bool TryGetExecutablePath(Process process, out string executablePath)

@@ -40,6 +40,10 @@ dotnet.exe run --project src/AutoHdrSwitcher -- --config C:\path\to\config.json
 - 如果没有配置任何规则，应用不会退出，而是继续运行并显示状态。
 - 最小化会将应用收纳到系统托盘（从任务栏移除）。双击托盘图标可恢复窗口。
 - 运行时视图会显示命中进程、所有全屏进程，以及每个显示器的 HDR 状态（`Supported`、`HDR On`、`Desired`、`Action`）。
+- 显示器表新增 `Auto` 列：`Auto=false` 时该显示器不再由自动逻辑控制，完全按用户手动设置。
+- 显示器表格中的 `HDR On` 支持直接勾选/取消，手动切换对应显示器 HDR。
+- 即使监听已停止，显示器 HDR 状态也会持续实时刷新。
+- 可开启 `Switch all displays together`，忽略具体显示器映射，在有命中时统一开启所有显示器 HDR、无命中时统一关闭。
 - 命中进程表还会显示 `Fullscreen`（全屏/无边框窗口启发式判断）。
 - 全屏表支持对每个进程勾选 `Ignore`。被忽略的条目不会影响自动全屏 HDR 模式。
 - Ignore 键优先使用可执行文件路径（`path:<fullpath>`），否则使用进程名（`name:<processName>`）。
@@ -60,7 +64,9 @@ dotnet.exe run --project src/AutoHdrSwitcher -- --config C:\path\to\config.json
 
 - `pollIntervalSeconds`（默认 2）
 - `monitorAllFullscreenProcesses`（默认 `false`）
+- `switchAllDisplaysTogether`（默认 `false`）
 - `runtimeTopSplitterDistance` / `runtimeBottomSplitterDistance`（`null` 表示使用内置默认值，默认大约显示 2 行）
 - `fullscreenIgnoreMap`（ignore key -> bool 的字典，支持 `path:...`、`pathprefix:...`、`name:...`）
+- `displayAutoModes`（显示器名 -> 自动控制开关；省略或 `true` 表示自动，`false` 表示手动）
 
 匹配优先级文档见 `docs/process-rule-matching.md`。

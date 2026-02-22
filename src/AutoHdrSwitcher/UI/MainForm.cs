@@ -15,6 +15,7 @@ public sealed class MainForm : Form
     private const int RuntimeBottomPanelMinSize = 60;
     private const int RuntimeMiddlePanelMinSize = 60;
     private const int RuntimeBottomSectionMinSize = 60;
+    private const int DisplayRefreshIntervalMs = 1000;
 
     private readonly string _configPath;
     private readonly ProcessMonitorService _monitorService = new();
@@ -25,8 +26,10 @@ public sealed class MainForm : Form
     private readonly BindingList<FullscreenProcessRow> _fullscreenRows = new();
     private readonly BindingList<DisplayHdrRow> _displayRows = new();
     private readonly Dictionary<string, bool> _fullscreenIgnoreMap = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, bool> _displayAutoModes = new(StringComparer.OrdinalIgnoreCase);
     private readonly System.Windows.Forms.Timer _monitorTimer = new();
     private readonly System.Windows.Forms.Timer _eventBurstTimer = new();
+    private readonly System.Windows.Forms.Timer _displayRefreshTimer = new();
 
     private SplitContainer _mainSplit = null!;
     private SplitContainer _runtimeSplit = null!;
@@ -40,6 +43,7 @@ public sealed class MainForm : Form
     private CheckBox _pollingEnabledCheck = null!;
     private CheckBox _minimizeToTrayCheck = null!;
     private CheckBox _monitorAllFullscreenCheck = null!;
+    private CheckBox _switchAllDisplaysCheck = null!;
     private ToolStripStatusLabel _monitorStateLabel = null!;
     private ToolStripStatusLabel _snapshotLabel = null!;
     private ToolStripStatusLabel _saveStateLabel = null!;
@@ -51,6 +55,7 @@ public sealed class MainForm : Form
 
     private bool _suppressDirtyTracking;
     private bool _suppressFullscreenIgnoreEvents;
+    private bool _suppressDisplayHdrToggleEvents;
     private bool _hasUnsavedChanges;
     private bool _refreshInFlight;
     private int _eventBurstRemaining;
@@ -195,7 +200,7 @@ public sealed class MainForm : Form
 
         _minimizeToTrayCheck = new CheckBox
         {
-            Text = "Minimize to tray",
+            Text = "Close to tray (exit from tray menu)",
             AutoSize = true,
             Margin = new Padding(0, 4, 12, 0)
         };
@@ -213,6 +218,18 @@ public sealed class MainForm : Form
             _ = RefreshSnapshotAsync();
         };
 
+        _switchAllDisplaysCheck = new CheckBox
+        {
+            Text = "Switch all displays together",
+            AutoSize = true,
+            Margin = new Padding(12, 4, 0, 0)
+        };
+        _switchAllDisplaysCheck.CheckedChanged += (_, _) =>
+        {
+            MarkDirty();
+            _ = RefreshSnapshotAsync();
+        };
+
         var monitorOptionsRow = new FlowLayoutPanel
         {
             AutoSize = true,
@@ -225,6 +242,7 @@ public sealed class MainForm : Form
         };
         monitorOptionsRow.Controls.Add(_minimizeToTrayCheck);
         monitorOptionsRow.Controls.Add(_monitorAllFullscreenCheck);
+        monitorOptionsRow.Controls.Add(_switchAllDisplaysCheck);
 
         var configRow = new TableLayoutPanel
         {
@@ -493,7 +511,7 @@ public sealed class MainForm : Form
             Dock = DockStyle.Fill,
             AutoGenerateColumns = false,
             DataSource = _displayRows,
-            ReadOnly = true,
+            ReadOnly = false,
             TabStop = false,
             AllowUserToAddRows = false,
             AllowUserToDeleteRows = false,
@@ -507,6 +525,7 @@ public sealed class MainForm : Form
             HeaderText = "Display",
             DataPropertyName = nameof(DisplayHdrRow.Display),
             ToolTipText = string.Empty,
+            ReadOnly = true,
             Width = 145
         });
         _displayGrid.Columns.Add(new DataGridViewTextBoxColumn
@@ -514,6 +533,7 @@ public sealed class MainForm : Form
             HeaderText = "Monitor",
             DataPropertyName = nameof(DisplayHdrRow.FriendlyName),
             ToolTipText = string.Empty,
+            ReadOnly = true,
             AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill
         });
         _displayGrid.Columns.Add(new DataGridViewCheckBoxColumn
@@ -521,13 +541,23 @@ public sealed class MainForm : Form
             HeaderText = "Supported",
             DataPropertyName = nameof(DisplayHdrRow.Supported),
             ToolTipText = string.Empty,
+            ReadOnly = true,
             Width = 85
+        });
+        _displayGrid.Columns.Add(new DataGridViewCheckBoxColumn
+        {
+            HeaderText = "Auto",
+            DataPropertyName = nameof(DisplayHdrRow.AutoMode),
+            ToolTipText = string.Empty,
+            ReadOnly = false,
+            Width = 65
         });
         _displayGrid.Columns.Add(new DataGridViewCheckBoxColumn
         {
             HeaderText = "HDR On",
             DataPropertyName = nameof(DisplayHdrRow.HdrEnabled),
             ToolTipText = string.Empty,
+            ReadOnly = false,
             Width = 75
         });
         _displayGrid.Columns.Add(new DataGridViewCheckBoxColumn
@@ -535,6 +565,7 @@ public sealed class MainForm : Form
             HeaderText = "Desired",
             DataPropertyName = nameof(DisplayHdrRow.DesiredHdr),
             ToolTipText = string.Empty,
+            ReadOnly = true,
             Width = 75
         });
         _displayGrid.Columns.Add(new DataGridViewTextBoxColumn
@@ -542,6 +573,7 @@ public sealed class MainForm : Form
             HeaderText = "Action",
             DataPropertyName = nameof(DisplayHdrRow.Action),
             ToolTipText = string.Empty,
+            ReadOnly = true,
             Width = 180
         });
         var displayGroup = new GroupBox
@@ -612,6 +644,17 @@ public sealed class MainForm : Form
     {
         _monitorTimer.Interval = 2000;
         _monitorTimer.Tick += async (_, _) => await RefreshSnapshotAsync();
+        _displayRefreshTimer.Interval = DisplayRefreshIntervalMs;
+        _displayRefreshTimer.Tick += async (_, _) =>
+        {
+            if (_monitoringActive)
+            {
+                return;
+            }
+
+            await RefreshDisplaySnapshotAsync();
+        };
+        _displayRefreshTimer.Start();
         _eventBurstTimer.Interval = 180;
         _eventBurstTimer.Tick += (_, _) =>
         {
@@ -657,11 +700,24 @@ public sealed class MainForm : Form
             }
         };
         _fullscreenGrid.CellValueChanged += (_, e) => HandleFullscreenIgnoreChanged(e.RowIndex, e.ColumnIndex);
+        _displayGrid.CurrentCellDirtyStateChanged += (_, _) =>
+        {
+            if (_displayGrid.IsCurrentCellDirty)
+            {
+                _displayGrid.CommitEdit(DataGridViewDataErrorContexts.Commit);
+            }
+        };
+        _displayGrid.CellValueChanged += (_, e) => _ = HandleDisplayGridValueChangedAsync(e.RowIndex, e.ColumnIndex);
+        _displayGrid.DataError += (_, eventArgs) =>
+        {
+            eventArgs.ThrowException = false;
+            SetMonitorStatus($"Display HDR input error: {eventArgs.Exception?.Message ?? "invalid value"}");
+        };
         _pollSecondsInput.Leave += (_, _) => SaveIfDirtyOnFocusLost();
         Deactivate += (_, _) => SaveIfDirtyOnFocusLost();
         Resize += (_, _) =>
         {
-            if (WindowState == FormWindowState.Minimized && !_exitRequested && _minimizeToTrayCheck.Checked)
+            if (WindowState == FormWindowState.Minimized && !_exitRequested)
             {
                 MinimizeToTray();
             }
@@ -691,7 +747,9 @@ public sealed class MainForm : Form
 
         FormClosing += (sender, e) =>
         {
-            if (!_exitRequested && WindowState == FormWindowState.Minimized && _minimizeToTrayCheck.Checked)
+            if (!_exitRequested &&
+                _minimizeToTrayCheck.Checked &&
+                e.CloseReason == CloseReason.UserClosing)
             {
                 e.Cancel = true;
                 MinimizeToTray();
@@ -699,6 +757,7 @@ public sealed class MainForm : Form
             }
 
             _eventBurstTimer.Stop();
+            _displayRefreshTimer.Stop();
             _processEventMonitor.Stop();
             _processEventMonitor.Dispose();
             _trayIcon.Visible = false;
@@ -768,6 +827,7 @@ public sealed class MainForm : Form
         _startButton.Enabled = true;
         _stopButton.Enabled = false;
         SetMonitorStatus("Monitor: stopped");
+        _ = RefreshDisplaySnapshotAsync();
     }
 
     private async Task RefreshSnapshotAsync()
@@ -782,7 +842,12 @@ public sealed class MainForm : Form
         {
             var rules = BuildRulesFromUi(commitEdits: false);
             var snapshot = await Task.Run(
-                () => _monitorService.Evaluate(rules, _monitorAllFullscreenCheck.Checked, _fullscreenIgnoreMap));
+                () => _monitorService.Evaluate(
+                    rules,
+                    _monitorAllFullscreenCheck.Checked,
+                    _fullscreenIgnoreMap,
+                    _switchAllDisplaysCheck.Checked,
+                    _displayAutoModes));
             ApplySnapshot(snapshot, rules.Count);
         }
         catch (Exception ex)
@@ -792,6 +857,36 @@ public sealed class MainForm : Form
         finally
         {
             _refreshInFlight = false;
+        }
+    }
+
+    private async Task RefreshDisplaySnapshotAsync()
+    {
+        if (_refreshInFlight)
+        {
+            return;
+        }
+
+        _refreshInFlight = true;
+        try
+        {
+            var displays = await Task.Run(() => _monitorService.GetLiveDisplayHdrStates(_displayAutoModes));
+            ApplyDisplayRows(displays);
+            ClearPassiveGridSelection(_displayGrid);
+            _snapshotLabel.Text = $"Last display refresh: {DateTimeOffset.Now:HH:mm:ss}";
+            SetMonitorStatus($"{GetMonitoringModeLabel()} | {BuildHdrSummary(displays)}");
+        }
+        catch (Exception ex)
+        {
+            SetMonitorStatus($"Display refresh error: {ex.Message}");
+        }
+        finally
+        {
+            _refreshInFlight = false;
+            if (_monitoringActive)
+            {
+                _ = RefreshSnapshotAsync();
+            }
         }
     }
 
@@ -864,19 +959,7 @@ public sealed class MainForm : Form
         }
         _suppressFullscreenIgnoreEvents = false;
 
-        _displayRows.Clear();
-        foreach (var display in snapshot.Displays)
-        {
-            _displayRows.Add(new DisplayHdrRow
-            {
-                Display = display.Display,
-                FriendlyName = display.FriendlyName,
-                Supported = display.IsHdrSupported,
-                HdrEnabled = display.IsHdrEnabled,
-                DesiredHdr = display.DesiredHdrEnabled,
-                Action = display.LastAction
-            });
-        }
+        ApplyDisplayRows(snapshot.Displays);
 
         ClearPassiveGridSelection(_matchGrid);
         ClearPassiveGridSelection(_fullscreenGrid);
@@ -905,6 +988,32 @@ public sealed class MainForm : Form
         SetMonitorStatus($"{modeLabel} ({snapshot.Matches.Count} match(es)) | {hdrSummary}");
     }
 
+    private void ApplyDisplayRows(IReadOnlyList<HdrDisplayStatus> displays)
+    {
+        _suppressDisplayHdrToggleEvents = true;
+        try
+        {
+            _displayRows.Clear();
+            foreach (var display in displays)
+            {
+                _displayRows.Add(new DisplayHdrRow
+                {
+                    Display = display.Display,
+                    FriendlyName = display.FriendlyName,
+                    Supported = display.IsHdrSupported,
+                    AutoMode = GetDisplayAutoMode(display.Display),
+                    HdrEnabled = display.IsHdrEnabled,
+                    DesiredHdr = display.DesiredHdrEnabled,
+                    Action = display.LastAction
+                });
+            }
+        }
+        finally
+        {
+            _suppressDisplayHdrToggleEvents = false;
+        }
+    }
+
     private void LoadConfigurationFromDisk()
     {
         var loaded = TryLoadConfigurationResilient();
@@ -928,12 +1037,28 @@ public sealed class MainForm : Form
             _pollingEnabledCheck.Checked = loaded.PollingEnabled;
             _minimizeToTrayCheck.Checked = loaded.MinimizeToTray;
             _monitorAllFullscreenCheck.Checked = loaded.MonitorAllFullscreenProcesses;
+            _switchAllDisplaysCheck.Checked = loaded.SwitchAllDisplaysTogether;
             _monitorTimer.Interval = pollSeconds * 1000;
             ApplyPollingMode();
             _fullscreenIgnoreMap.Clear();
             foreach (var entry in loaded.FullscreenIgnoreMap)
             {
                 _fullscreenIgnoreMap[entry.Key] = entry.Value;
+            }
+            _displayAutoModes.Clear();
+            foreach (var entry in loaded.DisplayAutoModes)
+            {
+                if (string.IsNullOrWhiteSpace(entry.Key))
+                {
+                    continue;
+                }
+
+                if (entry.Value)
+                {
+                    continue;
+                }
+
+                _displayAutoModes[entry.Key] = false;
             }
             foreach (var defaultIgnoreKey in ProcessMonitorService.DefaultIgnoreKeys)
             {
@@ -1031,10 +1156,12 @@ public sealed class MainForm : Form
                 PollingEnabled = _pollingEnabledCheck.Checked,
                 MinimizeToTray = _minimizeToTrayCheck.Checked,
                 MonitorAllFullscreenProcesses = _monitorAllFullscreenCheck.Checked,
+                SwitchAllDisplaysTogether = _switchAllDisplaysCheck.Checked,
                 MainSplitterDistance = GetCurrentSplitterDistance(_mainSplit),
                 RuntimeTopSplitterDistance = GetCurrentSplitterDistance(_runtimeSplit),
                 RuntimeBottomSplitterDistance = GetCurrentSplitterDistance(_runtimeBottomSplit),
                 FullscreenIgnoreMap = new Dictionary<string, bool>(_fullscreenIgnoreMap, StringComparer.OrdinalIgnoreCase),
+                DisplayAutoModes = BuildDisplayAutoModesConfigMap(),
                 ProcessRules = BuildRulesFromUi(commitEdits: true)
             };
             WatchConfigurationLoader.SaveToFile(_configPath, config);
@@ -1296,6 +1423,111 @@ public sealed class MainForm : Form
         _ = RefreshSnapshotAsync();
     }
 
+    private async Task HandleDisplayGridValueChangedAsync(int rowIndex, int columnIndex)
+    {
+        if (_suppressDisplayHdrToggleEvents || rowIndex < 0 || rowIndex >= _displayRows.Count)
+        {
+            return;
+        }
+
+        var autoColumn = _displayGrid.Columns
+            .Cast<DataGridViewColumn>()
+            .FirstOrDefault(static c => c.DataPropertyName == nameof(DisplayHdrRow.AutoMode));
+        if (autoColumn is not null && columnIndex == autoColumn.Index)
+        {
+            await HandleDisplayAutoModeChangedAsync(rowIndex);
+            return;
+        }
+
+        var hdrColumn = _displayGrid.Columns
+            .Cast<DataGridViewColumn>()
+            .FirstOrDefault(static c => c.DataPropertyName == nameof(DisplayHdrRow.HdrEnabled));
+        if (hdrColumn is null || columnIndex != hdrColumn.Index)
+        {
+            return;
+        }
+
+        await HandleDisplayHdrToggleChangedAsync(rowIndex);
+    }
+
+    private async Task HandleDisplayAutoModeChangedAsync(int rowIndex)
+    {
+        var row = _displayRows[rowIndex];
+        if (SetDisplayAutoMode(row.Display, row.AutoMode))
+        {
+            MarkDirty();
+        }
+
+        if (_monitoringActive)
+        {
+            await RefreshSnapshotAsync();
+            return;
+        }
+
+        await RefreshDisplaySnapshotAsync();
+    }
+
+    private async Task HandleDisplayHdrToggleChangedAsync(int rowIndex)
+    {
+        var row = _displayRows[rowIndex];
+        var targetEnabled = row.HdrEnabled;
+        if (SetDisplayAutoMode(row.Display, isAuto: false))
+        {
+            MarkDirty();
+        }
+
+        var success = await Task.Run(() => _monitorService.TrySetDisplayHdr(row.Display, targetEnabled, out var message)
+            ? (Ok: true, Message: message)
+            : (Ok: false, Message: message));
+        var actionPrefix = success.Ok ? "Manual HDR switch succeeded" : "Manual HDR switch failed";
+        SetMonitorStatus($"{actionPrefix}: {row.Display} | {success.Message}");
+
+        if (_monitoringActive)
+        {
+            await RefreshSnapshotAsync();
+            return;
+        }
+
+        await RefreshDisplaySnapshotAsync();
+    }
+
+    private bool GetDisplayAutoMode(string displayName)
+    {
+        return !_displayAutoModes.TryGetValue(displayName, out var autoMode) || autoMode;
+    }
+
+    private bool SetDisplayAutoMode(string displayName, bool isAuto)
+    {
+        if (string.IsNullOrWhiteSpace(displayName))
+        {
+            return false;
+        }
+
+        if (isAuto)
+        {
+            return _displayAutoModes.Remove(displayName);
+        }
+
+        if (_displayAutoModes.TryGetValue(displayName, out var current) && !current)
+        {
+            return false;
+        }
+
+        _displayAutoModes[displayName] = false;
+        return true;
+    }
+
+    private Dictionary<string, bool> BuildDisplayAutoModesConfigMap()
+    {
+        var result = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in _displayAutoModes)
+        {
+            result[entry.Key] = entry.Value;
+        }
+
+        return result;
+    }
+
     private bool ResolveIgnoreFromMap(FullscreenProcessInfo info)
     {
         if (_fullscreenIgnoreMap.TryGetValue(info.IgnoreKey, out var ignored))
@@ -1356,18 +1588,27 @@ public sealed class MainForm : Form
 
     private void PopulateDisplayPlaceholders()
     {
-        _displayRows.Clear();
-        foreach (var screen in Screen.AllScreens.OrderBy(static s => s.DeviceName, StringComparer.OrdinalIgnoreCase))
+        _suppressDisplayHdrToggleEvents = true;
+        try
         {
-            _displayRows.Add(new DisplayHdrRow
+            _displayRows.Clear();
+            foreach (var screen in Screen.AllScreens.OrderBy(static s => s.DeviceName, StringComparer.OrdinalIgnoreCase))
             {
-                Display = screen.DeviceName,
-                FriendlyName = screen.Primary ? $"{screen.DeviceName} (Primary)" : screen.DeviceName,
-                Supported = false,
-                HdrEnabled = false,
-                DesiredHdr = false,
-                Action = "Waiting for first scan"
-            });
+                _displayRows.Add(new DisplayHdrRow
+                {
+                    Display = screen.DeviceName,
+                    FriendlyName = screen.Primary ? $"{screen.DeviceName} (Primary)" : screen.DeviceName,
+                    Supported = false,
+                    AutoMode = GetDisplayAutoMode(screen.DeviceName),
+                    HdrEnabled = false,
+                    DesiredHdr = false,
+                    Action = "Waiting for first scan"
+                });
+            }
+        }
+        finally
+        {
+            _suppressDisplayHdrToggleEvents = false;
         }
     }
 

@@ -3,6 +3,7 @@
   "pollingEnabled": false,
   "minimizeToTray": true,
   "monitorAllFullscreenProcesses": false,
+  "switchAllDisplaysTogether": false,
   "mainSplitterDistance": null,
   "runtimeTopSplitterDistance": null,
   "runtimeBottomSplitterDistance": null,
@@ -11,6 +12,7 @@
     "name:TextInputHost": true,
     "name:dwm": true
   },
+  "displayAutoModes": {},
   "processRules": [
     {
       "pattern": "eldenring",

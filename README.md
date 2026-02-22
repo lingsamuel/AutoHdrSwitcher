@@ -41,6 +41,10 @@ Default behavior:
 - Polling is optional and disabled by default. App prefers process event stream for fast reaction.
 - `Minimize to tray` is enabled by default. When enabled, minimizing sends app to tray (removed from taskbar). Tray icon double-click restores window.
 - Runtime view shows matched processes, all fullscreen processes, and per-display HDR state (`Supported`, `HDR On`, `Desired`, `Action`).
+- `Auto` column controls per-display auto switching. `Auto=false` means this display is not touched by auto logic.
+- `HDR On` in display table is directly editable for manual HDR on/off per display.
+- Display HDR status keeps refreshing live even when monitor is stopped.
+- `Switch all displays together` can be enabled to ignore per-display mapping and toggle HDR on/off for all displays at once.
 - Matched process table also shows `Fullscreen` (fullscreen/borderless-windowed heuristic).
 - Fullscreen table supports `Ignore` checkbox per process. Ignored entries do not affect auto-fullscreen HDR mode.
 - Ignore key uses executable path when available (`path:<fullpath>`), otherwise process name (`name:<processName>`).
@@ -63,8 +67,12 @@ Top-level config fields:
 - `pollingEnabled` (default `false`)
 - `minimizeToTray` (default `true`)
 - `monitorAllFullscreenProcesses` (default `false`)
+- `switchAllDisplaysTogether` (default `false`)
 - `mainSplitterDistance` (rules/runtime split)
 - `runtimeTopSplitterDistance` / `runtimeBottomSplitterDistance` (`null` = use built-in defaults, about 2 rows visible by default)
 - `fullscreenIgnoreMap` (dictionary of ignore key -> bool, supports `path:...`, `pathprefix:...`, `name:...`)
+- `displayAutoModes` (dictionary of display name -> auto flag; omitted/`true` = auto, `false` = manual)
 
 Matching priority is documented in `docs/process-rule-matching.md`.
+
+System-level feature and design spec is documented in `docs/system-spec.md`.

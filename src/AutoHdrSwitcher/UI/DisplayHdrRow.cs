@@ -2,15 +2,17 @@ namespace AutoHdrSwitcher.UI;
 
 public sealed class DisplayHdrRow
 {
-    public string Display { get; init; } = string.Empty;
+    public string Display { get; set; } = string.Empty;
 
-    public string FriendlyName { get; init; } = string.Empty;
+    public string FriendlyName { get; set; } = string.Empty;
 
-    public bool Supported { get; init; }
+    public bool Supported { get; set; }
 
-    public bool HdrEnabled { get; init; }
+    public bool AutoMode { get; set; } = true;
 
-    public bool DesiredHdr { get; init; }
+    public bool HdrEnabled { get; set; }
 
-    public string Action { get; init; } = string.Empty;
+    public bool DesiredHdr { get; set; }
+
+    public string Action { get; set; } = string.Empty;
 }
