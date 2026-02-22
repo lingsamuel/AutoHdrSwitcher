@@ -86,7 +86,14 @@ public sealed class ProcessMonitorService
                             out var hasResolvedDisplay);
                         if (hasResolvedDisplay)
                         {
-                            _displayPredictionCache.RecordDisplay(predictionKeys, display);
+                            if (ShouldRecordPredictionCacheForProcess(
+                                    safeName,
+                                    executablePath,
+                                    isFullscreenLike,
+                                    fullscreenIgnoreMap))
+                            {
+                                _displayPredictionCache.RecordDisplay(predictionKeys, display);
+                            }
                         }
                         else
                         {
@@ -137,9 +144,6 @@ public sealed class ProcessMonitorService
                 ? safeName
                 : $"PID-{window.ProcessId}";
             _ = processPaths.TryGetValue(window.ProcessId, out var executablePath);
-            _displayPredictionCache.RecordDisplay(
-                BuildPredictionKeys(name, executablePath),
-                window.GdiDeviceName);
             ResolveIgnoreState(
                 name,
                 executablePath,
@@ -147,6 +151,12 @@ public sealed class ProcessMonitorService
                 out var ignoreKey,
                 out var isIgnored,
                 out var isDefaultIgnoreApplied);
+            if (!isIgnored)
+            {
+                _displayPredictionCache.RecordDisplay(
+                    BuildPredictionKeys(name, executablePath),
+                    window.GdiDeviceName);
+            }
             var matchedByRule = matchedPids.Contains(window.ProcessId);
             fullscreenProcesses.Add(new FullscreenProcessInfo
             {
@@ -542,6 +552,27 @@ public sealed class ProcessMonitorService
         ignoreKey = !string.IsNullOrEmpty(pathKey) ? pathKey : nameKey;
         isIgnored = defaultIgnored;
         isDefaultIgnoreApplied = defaultIgnored;
+    }
+
+    private static bool ShouldRecordPredictionCacheForProcess(
+        string processName,
+        string? executablePath,
+        bool isFullscreenLike,
+        IReadOnlyDictionary<string, bool> fullscreenIgnoreMap)
+    {
+        if (!isFullscreenLike)
+        {
+            return true;
+        }
+
+        ResolveIgnoreState(
+            processName,
+            executablePath,
+            fullscreenIgnoreMap,
+            out _,
+            out var isIgnored,
+            out _);
+        return !isIgnored;
     }
 
     public static string BuildPathIgnoreKey(string executablePath)
