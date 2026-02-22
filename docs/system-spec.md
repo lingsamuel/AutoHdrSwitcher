@@ -107,13 +107,17 @@ The app uses event-driven monitoring plus optional polling:
 1. Event source: WMI start/stop events (`Win32_ProcessStartTrace`, `Win32_ProcessStopTrace`).
 2. On relevant event, app performs immediate refresh and short burst refresh.
 3. Polling is user-configurable and default `disabled`.
-4. If event stream fails to start, app falls back to polling.
+4. If event stream fails to start, app tries a compatible WMI instance-event query path before declaring unavailable.
+5. Polling is never forced when `Enable polling` is unchecked.
+6. If running on instance fallback, app periodically retries trace mode in background.
 
 Monitor status text distinguishes:
 
 1. events only
 2. events + polling
-3. polling fallback
+3. polling fallback (event stream unavailable)
+4. event stream unavailable (polling disabled)
+5. status bar event source label: trace / instance (fallback) / unavailable
 
 ### 3.7 UI Requirements
 

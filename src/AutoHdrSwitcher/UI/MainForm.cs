@@ -16,6 +16,7 @@ public sealed class MainForm : Form
     private const int RuntimeMiddlePanelMinSize = 60;
     private const int RuntimeBottomSectionMinSize = 60;
     private const int DisplayRefreshIntervalMs = 1000;
+    private const int TraceRecoveryRetrySeconds = 30;
 
     private readonly string _configPath;
     private readonly ProcessMonitorService _monitorService = new();
@@ -48,6 +49,7 @@ public sealed class MainForm : Form
     private ToolStripStatusLabel _snapshotLabel = null!;
     private ToolStripStatusLabel _saveStateLabel = null!;
     private ToolStripStatusLabel _configPathLabel = null!;
+    private ToolStripStatusLabel _eventSourceLabel = null!;
     private Button _startButton = null!;
     private Button _stopButton = null!;
     private NotifyIcon _trayIcon = null!;
@@ -65,6 +67,7 @@ public sealed class MainForm : Form
     private int? _loadedMainSplitterDistance;
     private int? _loadedRuntimeTopSplitterDistance;
     private int? _loadedRuntimeBottomSplitterDistance;
+    private DateTimeOffset _nextTraceRecoveryAttemptAt = DateTimeOffset.MinValue;
 
     public MainForm(string configPath)
     {
@@ -603,6 +606,7 @@ public sealed class MainForm : Form
         _monitorStateLabel = new ToolStripStatusLabel("Monitor: starting...");
         _snapshotLabel = new ToolStripStatusLabel("Last scan: n/a");
         _saveStateLabel = new ToolStripStatusLabel("Config: clean");
+        _eventSourceLabel = new ToolStripStatusLabel("Event source: n/a");
         _configPathLabel = new ToolStripStatusLabel(_configPath);
 
         statusStrip.Items.Add(_monitorStateLabel);
@@ -610,6 +614,8 @@ public sealed class MainForm : Form
         statusStrip.Items.Add(_snapshotLabel);
         statusStrip.Items.Add(new ToolStripStatusLabel(" | "));
         statusStrip.Items.Add(_saveStateLabel);
+        statusStrip.Items.Add(new ToolStripStatusLabel(" | "));
+        statusStrip.Items.Add(_eventSourceLabel);
         statusStrip.Items.Add(new ToolStripStatusLabel(" | Config: "));
         statusStrip.Items.Add(_configPathLabel);
         return statusStrip;
@@ -649,6 +655,7 @@ public sealed class MainForm : Form
         {
             if (_monitoringActive)
             {
+                MaybeRecoverTraceEventStream();
                 return;
             }
 
@@ -668,6 +675,7 @@ public sealed class MainForm : Form
             _ = RefreshSnapshotAsync();
         };
         _processEventMonitor.ProcessEventReceived += ProcessEventMonitorOnProcessEventReceived;
+        _processEventMonitor.StreamModeChanged += ProcessEventMonitorOnStreamModeChanged;
 
         _pollSecondsInput.ValueChanged += (_, _) =>
         {
@@ -813,6 +821,7 @@ public sealed class MainForm : Form
         _eventStreamAvailable = EnsureProcessEventsStarted();
         _monitoringActive = true;
         ApplyPollingMode();
+        UpdateEventSourceLabel();
         _startButton.Enabled = false;
         _stopButton.Enabled = true;
         SetMonitorStatus(GetMonitoringModeLabel());
@@ -827,6 +836,7 @@ public sealed class MainForm : Form
         _processEventMonitor.Stop();
         _startButton.Enabled = true;
         _stopButton.Enabled = false;
+        UpdateEventSourceLabel();
         SetMonitorStatus("Monitor: stopped");
         _ = RefreshDisplaySnapshotAsync();
     }
@@ -1200,9 +1210,36 @@ public sealed class MainForm : Form
         _saveStateLabel.Text = text;
     }
 
+    private void UpdateEventSourceLabel()
+    {
+        _eventSourceLabel.Text = _processEventMonitor.CurrentMode switch
+        {
+            ProcessEventStreamMode.Trace => "Event source: trace",
+            ProcessEventStreamMode.Instance => "Event source: instance (fallback)",
+            _ => _monitoringActive ? "Event source: unavailable" : "Event source: stopped"
+        };
+    }
+
+    private void MaybeRecoverTraceEventStream()
+    {
+        if (_processEventMonitor.CurrentMode != ProcessEventStreamMode.Instance)
+        {
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        if (now < _nextTraceRecoveryAttemptAt)
+        {
+            return;
+        }
+
+        _nextTraceRecoveryAttemptAt = now.AddSeconds(TraceRecoveryRetrySeconds);
+        _processEventMonitor.TrySwitchToTrace(out _);
+    }
+
     private void ApplyPollingMode()
     {
-        var shouldPoll = _monitoringActive && (_pollingEnabledCheck.Checked || !_eventStreamAvailable);
+        var shouldPoll = _monitoringActive && _pollingEnabledCheck.Checked;
         if (shouldPoll)
         {
             _monitorTimer.Start();
@@ -1225,7 +1262,9 @@ public sealed class MainForm : Form
 
         if (!_eventStreamAvailable)
         {
-            return "Monitor: running (polling fallback)";
+            return _monitorTimer.Enabled
+                ? "Monitor: running (polling fallback; event stream unavailable)"
+                : "Monitor: running (event stream unavailable)";
         }
 
         return _monitorTimer.Enabled
@@ -1655,6 +1694,40 @@ public sealed class MainForm : Form
 
         SetSaveStatus($"Event stream unavailable: {error}");
         return false;
+    }
+
+    private void ProcessEventMonitorOnStreamModeChanged(object? sender, EventArgs e)
+    {
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        if (InvokeRequired)
+        {
+            BeginInvoke(new Action(HandleProcessEventModeChangedOnUiThread));
+            return;
+        }
+
+        HandleProcessEventModeChangedOnUiThread();
+    }
+
+    private void HandleProcessEventModeChangedOnUiThread()
+    {
+        _eventStreamAvailable = _processEventMonitor.CurrentMode != ProcessEventStreamMode.Unavailable;
+        if (_processEventMonitor.CurrentMode == ProcessEventStreamMode.Instance && _monitoringActive)
+        {
+            _nextTraceRecoveryAttemptAt = DateTimeOffset.UtcNow.AddSeconds(TraceRecoveryRetrySeconds);
+        }
+
+        if (_processEventMonitor.CurrentMode != ProcessEventStreamMode.Instance)
+        {
+            _nextTraceRecoveryAttemptAt = DateTimeOffset.MinValue;
+        }
+
+        ApplyPollingMode();
+        UpdateEventSourceLabel();
+        SetMonitorStatus(GetMonitoringModeLabel());
     }
 
     private void ProcessEventMonitorOnProcessEventReceived(object? sender, ProcessEventNotification e)
