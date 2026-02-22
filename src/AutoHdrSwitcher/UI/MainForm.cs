@@ -199,7 +199,7 @@ public sealed class MainForm : Form
                 _ruleGrid.CurrentCell = _ruleGrid.Rows[newIndex].Cells[0];
                 _ruleGrid.BeginEdit(selectAll: true);
             }
-            MarkDirty();
+            MarkDirtyAndRefreshRules("rule-added");
         };
 
         var removeRuleButton = new Button { Text = "Remove Selected", AutoSize = true };
@@ -815,12 +815,23 @@ public sealed class MainForm : Form
 
         _ruleGrid.CurrentCellDirtyStateChanged += (_, _) =>
         {
-            if (_ruleGrid.IsCurrentCellDirty)
+            if (!_ruleGrid.IsCurrentCellDirty || _ruleGrid.CurrentCell is null)
             {
-                _ruleGrid.CommitEdit(DataGridViewDataErrorContexts.Commit);
+                return;
             }
+
+            var column = _ruleGrid.Columns[_ruleGrid.CurrentCell.ColumnIndex];
+            // Only commit checkbox/combobox cells immediately.
+            // For text cells (Pattern), defer commit until edit ends to avoid partial-input matching churn.
+            if (column is not DataGridViewCheckBoxColumn &&
+                column is not DataGridViewComboBoxColumn)
+            {
+                return;
+            }
+
+            _ruleGrid.CommitEdit(DataGridViewDataErrorContexts.Commit);
         };
-        _ruleGrid.CellValueChanged += (_, _) => MarkDirty();
+        _ruleGrid.CellValueChanged += (_, e) => HandleRuleGridValueChanged(e.RowIndex, e.ColumnIndex);
         _ruleGrid.CellEndEdit += (_, _) =>
         {
             SaveIfDirtyOnFocusLost();
@@ -976,7 +987,33 @@ public sealed class MainForm : Form
             }
         }
 
+        MarkDirtyAndRefreshRules("rule-removed");
+    }
+
+    private void HandleRuleGridValueChanged(int rowIndex, int columnIndex)
+    {
+        if (rowIndex < 0 || columnIndex < 0)
+        {
+            return;
+        }
+
+        MarkDirtyAndRefreshRules("rule-grid-value-changed");
+    }
+
+    private void MarkDirtyAndRefreshRules(string refreshReason)
+    {
         MarkDirty();
+        TriggerRuleRefreshIfMonitoring(refreshReason);
+    }
+
+    private void TriggerRuleRefreshIfMonitoring(string reason)
+    {
+        if (!_monitoringActive || _suppressDirtyTracking)
+        {
+            return;
+        }
+
+        _ = RefreshSnapshotAsync(reason);
     }
 
     private void MarkDirty()
