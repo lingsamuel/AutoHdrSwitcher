@@ -39,8 +39,10 @@ Default behavior:
 - If config file is missing, app auto-creates it (`config.json` in app directory by default).
 - If no rules are configured, app keeps running and shows status instead of exiting.
 - Polling is optional and disabled by default. App prefers process event stream for fast reaction.
-- Runtime logs are written to `logs/autohdrswitcher.log` under app base directory, and reset on every app launch.
-- `Minimize to tray` is enabled by default. When enabled, minimizing sends app to tray (removed from taskbar). Tray icon double-click restores window.
+- When `enableLogging=true`, runtime logs are written to `logs/autohdrswitcher.log` under app base directory, and reset on every app launch.
+- `Close to tray` (`minimizeToTray`) is enabled by default. Closing the window hides it to tray instead of exiting.
+- Minimizing the window also hides it to tray (removed from taskbar).
+- Left-clicking the tray icon toggles restore/minimize.
 - Runtime view shows matched processes, all fullscreen processes, and per-display HDR state (`Supported`, `HDR On`, `Desired`, `Action`).
 - `Auto` column controls per-display auto switching. `Auto=false` means this display is not touched by auto logic.
 - `HDR On` in display table is directly editable for manual HDR on/off per display.
@@ -54,7 +56,7 @@ Default behavior:
 - Matched process table also shows `Fullscreen` (fullscreen/borderless-windowed heuristic).
 - Fullscreen table supports `Ignore` checkbox per process. Ignored entries do not affect auto-fullscreen HDR mode.
 - Ignore key uses executable path when available (`path:<fullpath>`), otherwise process name (`name:<processName>`).
-- Built-in default ignores include `pathprefix:C:\Windows\`, `name:TextInputHost`, and `name:dwm` (auto-generated in config when missing).
+- Built-in default ignores are auto-generated when missing, including `pathprefix:C:\Windows\` and a larger default process-name set (for example: `name:TextInputHost`, `name:dwm`, `name:explorer`, `name:chrome`, `name:msedge`, etc.).
 - Runtime split layout is saved in config; window size/position/maximized state is saved with WinForms user settings.
 
 ## Rule Configuration
@@ -73,7 +75,7 @@ Top-level config fields:
 - `pollIntervalSeconds` (default 2)
 - `pollingEnabled` (default `false`)
 - `minimizeToTray` (default `true`)
-- `enableLogging` (default `true`; when disabled, file logging is off)
+- `enableLogging` (default `false`; when disabled, file logging is off)
 - `autoRequestAdminForTrace` (default `false`; when true and not elevated, app prompts UAC and relaunches as admin to improve trace event availability)
 - `monitorAllFullscreenProcesses` (default `false`)
 - `switchAllDisplaysTogether` (default `false`)

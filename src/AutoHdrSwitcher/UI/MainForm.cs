@@ -1,7 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing.Drawing2D;
-using System.Globalization;
 using System.Runtime.InteropServices;
 using AutoHdrSwitcher.Config;
 using AutoHdrSwitcher.Logging;
@@ -1200,7 +1199,7 @@ public sealed class MainForm : Form
             _ruleGrid.ClearSelection();
         }
 
-        UpdateTrayMatchIndicator(snapshot.Matches.Count);
+        UpdateTrayMatchIndicator(GetTrayIndicatorMatchCount(snapshot));
         _runtimeGroup.Text = $"Runtime Status (Matches: {snapshot.Matches.Count})";
         _fullscreenGroup.Text = $"Detected Fullscreen Processes (Fullscreen: {snapshot.FullscreenProcesses.Count})";
         var hdrSummary = BuildHdrSummary(snapshot.Displays);
@@ -2135,6 +2134,20 @@ public sealed class MainForm : Form
         Activate();
     }
 
+    private int GetTrayIndicatorMatchCount(ProcessMonitorSnapshot snapshot)
+    {
+        var ruleMatchCount = snapshot.Matches.Count;
+        if (!_monitorAllFullscreenCheck.Checked)
+        {
+            return ruleMatchCount;
+        }
+
+        var fullscreenAutoMatchCount = snapshot.FullscreenProcesses.Count(static process =>
+            !process.IsIgnored &&
+            !process.MatchedByRule);
+        return ruleMatchCount + fullscreenAutoMatchCount;
+    }
+
     private void UpdateTrayMatchIndicator(int matchCount)
     {
         var normalizedCount = Math.Max(0, matchCount);
@@ -2159,7 +2172,14 @@ public sealed class MainForm : Form
             return;
         }
 
-        using var badgeBitmap = BuildTrayBadgeBitmap(normalizedCount);
+        var hadMatches = _lastTrayMatchCount > 0;
+        if (hadMatches && _trayBadgeIcon is not null)
+        {
+            _lastTrayMatchCount = normalizedCount;
+            return;
+        }
+
+        using var badgeBitmap = BuildTrayMatchDotBitmap();
         var badgeIcon = CreateIconFromBitmap(badgeBitmap);
         if (badgeIcon is null)
         {
@@ -2172,7 +2192,7 @@ public sealed class MainForm : Form
         _lastTrayMatchCount = normalizedCount;
     }
 
-    private Bitmap BuildTrayBadgeBitmap(int matchCount)
+    private Bitmap BuildTrayMatchDotBitmap()
     {
         var iconSize = SystemInformation.SmallIconSize;
         var bitmap = new Bitmap(iconSize.Width, iconSize.Height);
@@ -2184,37 +2204,19 @@ public sealed class MainForm : Form
         graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
         graphics.DrawIcon(_trayBaseIcon, new Rectangle(Point.Empty, iconSize));
 
-        var badgeDiameter = Math.Max(10, Math.Min(iconSize.Width, iconSize.Height) - 5);
+        var badgeDiameter = Math.Max(6, Math.Min(iconSize.Width, iconSize.Height) / 2 - 1);
+        var badgeX = Math.Max(0, iconSize.Width - badgeDiameter - 1);
+        var badgeY = Math.Max(0, iconSize.Height - badgeDiameter - 1);
         var badgeRect = new Rectangle(
-            iconSize.Width - badgeDiameter,
-            iconSize.Height - badgeDiameter,
+            badgeX,
+            badgeY,
             badgeDiameter,
             badgeDiameter);
 
-        using var badgeBrush = new SolidBrush(Color.FromArgb(230, 214, 46, 46));
+        using var badgeBrush = new SolidBrush(Color.FromArgb(240, 46, 204, 113));
         using var badgeOutline = new Pen(Color.White, 1F);
-        using var badgeTextBrush = new SolidBrush(Color.White);
-        using var textLayout = new StringFormat
-        {
-            Alignment = StringAlignment.Center,
-            LineAlignment = StringAlignment.Center,
-            FormatFlags = StringFormatFlags.NoWrap
-        };
-
         graphics.FillEllipse(badgeBrush, badgeRect);
         graphics.DrawEllipse(badgeOutline, badgeRect);
-
-        var badgeText = matchCount > 99
-            ? "99+"
-            : matchCount.ToString(CultureInfo.InvariantCulture);
-        var fontSize = badgeText.Length switch
-        {
-            1 => 8F,
-            2 => 7F,
-            _ => 5.5F
-        };
-        using var font = new Font("Segoe UI", fontSize, FontStyle.Bold, GraphicsUnit.Pixel);
-        graphics.DrawString(badgeText, font, badgeTextBrush, badgeRect, textLayout);
 
         return bitmap;
     }

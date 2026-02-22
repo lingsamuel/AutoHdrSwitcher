@@ -38,8 +38,11 @@ dotnet.exe run --project src/AutoHdrSwitcher -- --config C:\path\to\config.json
 - 应用启动 GUI（规则表 + 运行时状态表）。
 - 如果配置文件不存在，应用会自动创建（默认是程序目录下的 `config.json`）。
 - 如果没有配置任何规则，应用不会退出，而是继续运行并显示状态。
-- 最小化会将应用收纳到系统托盘（从任务栏移除）。双击托盘图标可恢复窗口。
-- 运行日志会写入程序目录下的 `logs/autohdrswitcher.log`，并在每次启动时清空旧日志。
+- 轮询是可选项，默认关闭。程序优先使用进程事件流（WMI）来更快响应。
+- `Close to tray`（`minimizeToTray`）默认开启：点击窗口关闭按钮时会隐藏到系统托盘而不是退出。
+- 最小化窗口也会隐藏到系统托盘（从任务栏移除）。
+- 单击托盘图标可在隐藏/恢复之间切换。
+- 当 `enableLogging=true` 时，运行日志会写入程序目录下的 `logs/autohdrswitcher.log`，并在每次启动时清空旧日志。
 - 运行时视图会显示命中进程、所有全屏进程，以及每个显示器的 HDR 状态（`Supported`、`HDR On`、`Desired`、`Action`）。
 - 显示器表新增 `Auto` 列：`Auto=false` 时该显示器不再由自动逻辑控制，完全按用户手动设置。
 - 显示器表格中的 `HDR On` 支持直接勾选/取消，手动切换对应显示器 HDR。
@@ -49,8 +52,8 @@ dotnet.exe run --project src/AutoHdrSwitcher -- --config C:\path\to\config.json
 - 命中进程表还会显示 `Fullscreen`（全屏/无边框窗口启发式判断）。
 - 全屏表支持对每个进程勾选 `Ignore`。被忽略的条目不会影响自动全屏 HDR 模式。
 - Ignore 键优先使用可执行文件路径（`path:<fullpath>`），否则使用进程名（`name:<processName>`）。
-- 内置默认忽略项包括 `pathprefix:C:\Windows\` 和 `name:TextInputHost`（若缺失会在配置中自动生成）。
-- 运行时分割布局（表格高度）会保存到配置并在下次启动时恢复。
+- 内置默认忽略项会在缺失时自动补全，包括 `pathprefix:C:\Windows\` 以及一组常见进程名（例如：`name:TextInputHost`、`name:dwm`、`name:explorer`、`name:chrome`、`name:msedge` 等）。
+- 运行时分割布局（表格高度）会保存到配置并在下次启动时恢复；窗口位置/大小/最大化状态由 WinForms 用户设置持久化。
 
 ## 规则配置
 
@@ -68,10 +71,11 @@ dotnet.exe run --project src/AutoHdrSwitcher -- --config C:\path\to\config.json
 - `pollIntervalSeconds`（默认 2）
 - `pollingEnabled`（默认 `false`）
 - `minimizeToTray`（默认 `true`）
-- `enableLogging`（默认 `true`；关闭后禁用文件日志）
+- `enableLogging`（默认 `false`；关闭后禁用文件日志）
 - `autoRequestAdminForTrace`（默认 `false`；开启后若当前非管理员，会自动弹 UAC 并以管理员权限重启，提升 trace 事件可用性）
 - `monitorAllFullscreenProcesses`（默认 `false`）
 - `switchAllDisplaysTogether`（默认 `false`）
+- `mainSplitterDistance`（规则区/运行时区分割位置）
 - `runtimeTopSplitterDistance` / `runtimeBottomSplitterDistance`（`null` 表示使用内置默认值，默认大约显示 2 行）
 - `fullscreenIgnoreMap`（ignore key -> bool 的字典，支持 `path:...`、`pathprefix:...`、`name:...`）
 - `displayAutoModes`（显示器名 -> 自动控制开关；省略或 `true` 表示自动，`false` 表示手动）
