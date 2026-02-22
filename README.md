@@ -39,6 +39,7 @@ Default behavior:
 - If config file is missing, app auto-creates it (`config.json` in app directory by default).
 - If no rules are configured, app keeps running and shows status instead of exiting.
 - Polling is optional and disabled by default. App prefers process event stream for fast reaction.
+- Runtime logs are written to `logs/autohdrswitcher.log` under app base directory.
 - `Minimize to tray` is enabled by default. When enabled, minimizing sends app to tray (removed from taskbar). Tray icon double-click restores window.
 - Runtime view shows matched processes, all fullscreen processes, and per-display HDR state (`Supported`, `HDR On`, `Desired`, `Action`).
 - `Auto` column controls per-display auto switching. `Auto=false` means this display is not touched by auto logic.

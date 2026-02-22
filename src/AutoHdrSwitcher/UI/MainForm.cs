@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using AutoHdrSwitcher.Config;
+using AutoHdrSwitcher.Logging;
 using AutoHdrSwitcher.Matching;
 using AutoHdrSwitcher.Monitoring;
 
@@ -818,6 +819,7 @@ public sealed class MainForm : Form
 
     private void StartMonitoring()
     {
+        AppLogger.Info("Start monitoring requested.");
         _eventStreamAvailable = EnsureProcessEventsStarted();
         _monitoringActive = true;
         ApplyPollingMode();
@@ -829,6 +831,7 @@ public sealed class MainForm : Form
 
     private void StopMonitoring()
     {
+        AppLogger.Info("Stop monitoring requested.");
         _monitoringActive = false;
         _monitorTimer.Stop();
         _eventBurstTimer.Stop();
@@ -1225,6 +1228,11 @@ public sealed class MainForm : Form
             return;
         }
 
+        if (_processEventMonitor.IsTraceRetrySuppressed)
+        {
+            return;
+        }
+
         var now = DateTimeOffset.UtcNow;
         if (now < _nextTraceRecoveryAttemptAt)
         {
@@ -1232,7 +1240,10 @@ public sealed class MainForm : Form
         }
 
         _nextTraceRecoveryAttemptAt = now.AddSeconds(TraceRecoveryRetrySeconds);
-        _processEventMonitor.TrySwitchToTrace(out _);
+        if (!_processEventMonitor.TrySwitchToTrace(out var error))
+        {
+            AppLogger.Warn($"Background trace recovery attempt failed: {error}");
+        }
     }
 
     private void ApplyPollingMode()
@@ -1688,9 +1699,19 @@ public sealed class MainForm : Form
     {
         if (_processEventMonitor.Start(out var error))
         {
+            AppLogger.Info("Event stream started successfully.");
             return true;
         }
 
+        if (_processEventMonitor.IsTraceRetrySuppressed &&
+            _processEventMonitor.CurrentMode == ProcessEventStreamMode.Instance)
+        {
+            SetSaveStatus($"Trace event access denied; running with fallback stream. {error}");
+            AppLogger.Warn($"Trace access denied; fallback stream only. {error}");
+            return true;
+        }
+
+        AppLogger.Warn($"Event stream unavailable: {error}");
         SetSaveStatus($"Event stream unavailable: {error}");
         return false;
     }
@@ -1726,6 +1747,7 @@ public sealed class MainForm : Form
 
         ApplyPollingMode();
         SetMonitorStatus(GetMonitoringModeLabel());
+        AppLogger.Info($"UI observed event stream mode: {_processEventMonitor.CurrentMode}");
     }
 
     private void ProcessEventMonitorOnProcessEventReceived(object? sender, ProcessEventNotification e)

@@ -1,4 +1,5 @@
 using AutoHdrSwitcher.UI;
+using AutoHdrSwitcher.Logging;
 
 namespace AutoHdrSwitcher;
 
@@ -9,12 +10,16 @@ internal static class Program
     {
         try
         {
+            AppLogger.Info($"Startup begin. Args: {string.Join(' ', args)}");
             ApplicationConfiguration.Initialize();
             var configPath = ResolveConfigPath(args);
+            AppLogger.Info($"Launching MainForm with config path: {configPath}");
             Application.Run(new MainForm(configPath));
+            AppLogger.Info("Application exited normally.");
         }
         catch (Exception ex)
         {
+            AppLogger.Error("Unhandled startup exception.", ex);
             MessageBox.Show(
                 $"AutoHdrSwitcher failed to start.\n\n{ex}",
                 "AutoHdrSwitcher Startup Error",
