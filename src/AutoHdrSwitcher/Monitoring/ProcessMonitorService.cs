@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using AutoHdrSwitcher.Display;
+using AutoHdrSwitcher.Logging;
 using AutoHdrSwitcher.Matching;
 using System.Windows.Forms;
 
@@ -40,6 +41,7 @@ public sealed class ProcessMonitorService
         ArgumentNullException.ThrowIfNull(displayAutoModes);
         ArgumentNullException.ThrowIfNull(processTargetDisplayOverrides);
 
+        var evaluationStopwatch = Stopwatch.StartNew();
         var processArray = Process.GetProcesses();
         var resolvedWindows = _displayResolver.CaptureProcessWindows();
         var matches = new List<ProcessMatchResult>();
@@ -50,6 +52,10 @@ public sealed class ProcessMonitorService
         var processPaths = new Dictionary<int, string>();
         var availableDisplays = BuildAvailableDisplaySet();
         var forceSwitchAllDisplaysByTarget = false;
+        var requiresPathCandidates = RulesRequirePathCandidates(rules);
+        var hasPathTargetOverrides = HasPathTargetOverrides(processTargetDisplayOverrides);
+        var pathLookupAttempts = 0;
+        var pathLookupSucceeded = 0;
 
         foreach (var process in processArray)
         {
@@ -61,13 +67,14 @@ public sealed class ProcessMonitorService
                     var safeName = SafeProcessName(process);
                     processNames[processId] = safeName;
                     string? executablePath = null;
-                    if (TryGetExecutablePath(process, out var discoveredPath))
+                    if (requiresPathCandidates &&
+                        TryGetExecutablePathWithStats(process, ref pathLookupAttempts, ref pathLookupSucceeded, out var discoveredPath))
                     {
                         executablePath = discoveredPath;
                         processPaths[processId] = discoveredPath;
                     }
 
-                    foreach (var candidate in BuildCandidates(process))
+                    foreach (var candidate in BuildCandidates(safeName, executablePath))
                     {
                         if (!TryFindFirstMatchingRule(candidate, rules, out var matchedRule, out var matchedRuleIndex))
                         {
@@ -77,6 +84,14 @@ public sealed class ProcessMonitorService
                         if (!matchedPids.Add(processId))
                         {
                             break;
+                        }
+
+                        if (string.IsNullOrWhiteSpace(executablePath) &&
+                            hasPathTargetOverrides &&
+                            TryGetExecutablePathWithStats(process, ref pathLookupAttempts, ref pathLookupSucceeded, out discoveredPath))
+                        {
+                            executablePath = discoveredPath;
+                            processPaths[processId] = discoveredPath;
                         }
 
                         var targetResolution = ResolveDisplayForRule(
@@ -135,6 +150,16 @@ public sealed class ProcessMonitorService
                 ? safeName
                 : $"PID-{window.ProcessId}";
             _ = processPaths.TryGetValue(window.ProcessId, out var executablePath);
+            if (string.IsNullOrWhiteSpace(executablePath) &&
+                TryGetExecutablePathByProcessIdWithStats(
+                    window.ProcessId,
+                    ref pathLookupAttempts,
+                    ref pathLookupSucceeded,
+                    out var discoveredPath))
+            {
+                executablePath = discoveredPath;
+                processPaths[window.ProcessId] = discoveredPath;
+            }
             ResolveIgnoreState(
                 name,
                 executablePath,
@@ -166,6 +191,9 @@ public sealed class ProcessMonitorService
             switchAllDisplaysTogether,
             displayAutoModes,
             forceSwitchAllDisplaysByTarget);
+        evaluationStopwatch.Stop();
+        AppLogger.Info(
+            $"Process evaluation finished. durationMs={evaluationStopwatch.Elapsed.TotalMilliseconds:F3}; processCount={processArray.Length}; windowCount={resolvedWindows.Count}; matches={matches.Count}; fullscreen={fullscreenProcesses.Count}; pathLookupAttempts={pathLookupAttempts}; pathLookupSucceeded={pathLookupSucceeded}; requiresPathCandidates={requiresPathCandidates}; hasPathTargetOverrides={hasPathTargetOverrides}");
         matches.Sort(static (a, b) => a.ProcessName.CompareTo(b.ProcessName));
         fullscreenProcesses.Sort(static (a, b) =>
         {
@@ -235,9 +263,11 @@ public sealed class ProcessMonitorService
 
     public bool TrySetDisplayHdr(string gdiDisplayName, bool enable, out string message)
     {
+        AppLogger.Info($"Manual HDR request received. display={gdiDisplayName}; desired={enable}");
         if (string.IsNullOrWhiteSpace(gdiDisplayName))
         {
             message = "Display name is required";
+            AppLogger.Warn($"Manual HDR request rejected. reason={message}");
             return false;
         }
 
@@ -246,58 +276,64 @@ public sealed class ProcessMonitorService
         if (display is null)
         {
             message = $"Display not found: {gdiDisplayName}";
+            AppLogger.Warn($"Manual HDR request rejected. reason={message}");
             return false;
         }
 
         if (!display.IsHdrSupported)
         {
             message = "HDR unsupported";
+            AppLogger.Warn($"Manual HDR request rejected. display={gdiDisplayName}; reason={message}");
             return false;
         }
 
         if (display.IsHdrEnabled == enable)
         {
             message = enable ? "HDR already enabled" : "HDR already disabled";
+            AppLogger.Info($"Manual HDR request no-op. display={gdiDisplayName}; current={display.IsHdrEnabled}; desired={enable}");
             return true;
         }
 
-        return _hdrController.TrySetHdr(display, enable, out message);
+        var success = _hdrController.TrySetHdr(display, enable, out message);
+        if (success)
+        {
+            AppLogger.Info($"Manual HDR request applied. display={gdiDisplayName}; desired={enable}; result={message}");
+        }
+        else
+        {
+            AppLogger.Warn($"Manual HDR request failed. display={gdiDisplayName}; desired={enable}; result={message}");
+        }
+
+        return success;
     }
 
-    private static IEnumerable<string> BuildCandidates(Process process)
+    private static IEnumerable<string> BuildCandidates(string processName, string? executablePath)
     {
-        var unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var processName = SafeProcessName(process);
-
-        AddCandidate(unique, processName);
-        AddCandidate(unique, processName + ".exe");
-
-        try
+        if (!string.IsNullOrWhiteSpace(processName))
         {
-            var modulePath = process.MainModule?.FileName;
-            if (!string.IsNullOrWhiteSpace(modulePath))
-            {
-                AddCandidate(unique, modulePath);
-                AddCandidate(unique, Path.GetFileName(modulePath));
-            }
-        }
-        catch (InvalidOperationException)
-        {
-            // Process exited during inspection.
-        }
-        catch (Win32Exception)
-        {
-            // Access denied for MainModule.
+            yield return processName;
         }
 
-        return unique;
-    }
-
-    private static void AddCandidate(HashSet<string> target, string? value)
-    {
-        if (!string.IsNullOrWhiteSpace(value))
+        var processNameWithExe = processName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+            ? processName
+            : processName + ".exe";
+        if (!string.Equals(processNameWithExe, processName, StringComparison.OrdinalIgnoreCase))
         {
-            target.Add(value);
+            yield return processNameWithExe;
+        }
+
+        if (string.IsNullOrWhiteSpace(executablePath))
+        {
+            yield break;
+        }
+
+        yield return executablePath;
+        var executableName = Path.GetFileName(executablePath);
+        if (!string.IsNullOrWhiteSpace(executableName) &&
+            !string.Equals(executableName, processName, StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(executableName, processNameWithExe, StringComparison.OrdinalIgnoreCase))
+        {
+            yield return executableName;
         }
     }
 
@@ -521,6 +557,11 @@ public sealed class ProcessMonitorService
         var desiredForAllDisplays =
             (switchAllDisplaysTogether && matchedDisplays.Count > 0) ||
             forceSwitchAllDisplaysByTarget;
+        var matchedDisplayList = matchedDisplays.Count == 0
+            ? "<none>"
+            : string.Join(",", matchedDisplays.OrderBy(static name => name, StringComparer.OrdinalIgnoreCase));
+        AppLogger.Info(
+            $"HDR evaluation start. displays={displays.Count}; matchedDisplays={matchedDisplays.Count}; matchedList={matchedDisplayList}; switchAllDisplaysTogether={switchAllDisplaysTogether}; forceSwitchAllDisplaysByTarget={forceSwitchAllDisplaysByTarget}; desiredForAllDisplays={desiredForAllDisplays}");
         foreach (var display in displays)
         {
             var isAuto = ResolveDisplayAutoMode(display.GdiDeviceName, displayAutoModes);
@@ -533,22 +574,37 @@ public sealed class ProcessMonitorService
             var action = isAuto
                 ? "No change (Auto=true)"
                 : "Skipped auto control (Auto=false)";
+            var isMatched = matchedDisplays.Contains(display.GdiDeviceName);
+            AppLogger.Info(
+                $"HDR decision. display={display.GdiDeviceName}; monitor={display.FriendlyName}; auto={isAuto}; supported={display.IsHdrSupported}; current={display.IsHdrEnabled}; desired={desired}; matched={isMatched}; desiredForAllDisplays={desiredForAllDisplays}");
 
             if (!display.IsHdrSupported)
             {
                 action = "HDR unsupported";
+                AppLogger.Info($"HDR decision skipped. display={display.GdiDeviceName}; reason={action}");
             }
             else if (isAuto && display.IsHdrEnabled != desired)
             {
+                AppLogger.Info(
+                    $"HDR apply begin. display={display.GdiDeviceName}; from={display.IsHdrEnabled}; to={desired}");
                 if (_hdrController.TrySetHdr(display, desired, out var actionText))
                 {
                     hdrEnabled = desired;
                     action = actionText;
+                    AppLogger.Info(
+                        $"HDR apply success. display={display.GdiDeviceName}; from={display.IsHdrEnabled}; to={desired}; result={actionText}");
                 }
                 else
                 {
                     action = actionText;
+                    AppLogger.Warn(
+                        $"HDR apply failed. display={display.GdiDeviceName}; from={display.IsHdrEnabled}; to={desired}; result={actionText}");
                 }
+            }
+            else
+            {
+                AppLogger.Info(
+                    $"HDR apply skipped. display={display.GdiDeviceName}; current={display.IsHdrEnabled}; desired={desired}; auto={isAuto}; reason={action}");
             }
 
             statuses.Add(new HdrDisplayStatus
@@ -571,6 +627,8 @@ public sealed class ProcessMonitorService
                 continue;
             }
 
+            AppLogger.Warn(
+                $"HDR status unavailable for active screen. display={screen.DeviceName}; primary={screen.Primary}; desired={ResolveDisplayAutoMode(screen.DeviceName, displayAutoModes) && (desiredForAllDisplays || matchedDisplays.Contains(screen.DeviceName))}");
             statuses.Add(new HdrDisplayStatus
             {
                 Display = screen.DeviceName,
@@ -585,6 +643,7 @@ public sealed class ProcessMonitorService
         }
 
         statuses.Sort(static (a, b) => string.Compare(a.Display, b.Display, StringComparison.OrdinalIgnoreCase));
+        AppLogger.Info($"HDR evaluation completed. statusCount={statuses.Count}");
         return statuses;
     }
 
@@ -619,6 +678,81 @@ public sealed class ProcessMonitorService
             executablePath = string.Empty;
             return false;
         }
+    }
+
+    private static bool TryGetExecutablePathWithStats(
+        Process process,
+        ref int attempts,
+        ref int succeeded,
+        out string executablePath)
+    {
+        attempts++;
+        var ok = TryGetExecutablePath(process, out executablePath);
+        if (ok)
+        {
+            succeeded++;
+        }
+
+        return ok;
+    }
+
+    private static bool TryGetExecutablePathByProcessIdWithStats(
+        int processId,
+        ref int attempts,
+        ref int succeeded,
+        out string executablePath)
+    {
+        executablePath = string.Empty;
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            return TryGetExecutablePathWithStats(process, ref attempts, ref succeeded, out executablePath);
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private static bool RulesRequirePathCandidates(IReadOnlyList<ProcessWatchRule> rules)
+    {
+        foreach (var rule in rules)
+        {
+            if (!rule.Enabled || string.IsNullOrWhiteSpace(rule.Pattern))
+            {
+                continue;
+            }
+
+            if (rule.RegexMode)
+            {
+                return true;
+            }
+
+            var pattern = rule.Pattern;
+            if (pattern.Contains('\\') || pattern.Contains('/') || pattern.Contains(':'))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasPathTargetOverrides(IReadOnlyDictionary<string, string> processTargetDisplayOverrides)
+    {
+        foreach (var key in processTargetDisplayOverrides.Keys)
+        {
+            if (key.StartsWith("path:", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static void ResolveIgnoreState(

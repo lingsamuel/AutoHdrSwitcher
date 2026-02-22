@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using AutoHdrSwitcher.Config;
 using AutoHdrSwitcher.Logging;
 using AutoHdrSwitcher.Matching;
@@ -19,6 +20,18 @@ public sealed class MainForm : Form
     private const int RuntimeBottomSectionMinSize = 60;
     private const int DisplayRefreshIntervalMs = 1000;
     private const int TraceRecoveryRetrySeconds = 30;
+    private const int DefaultEventBurstRefreshCount = 6;
+    private const int TraceStartProactiveRefreshCount = 4;
+    private const int PendingStartEventRetentionSeconds = 180;
+    private static readonly string[] EventBurstIgnoredProcessPrefixes =
+    {
+        "conhost",
+        "nvngx_update",
+        "runtimebroker",
+        "backgroundtask",
+        "gamebarpresenc",
+        "fping"
+    };
     private static readonly Icon? AppIconTemplate = LoadAppIconTemplate();
 
     private readonly string _configPath;
@@ -32,6 +45,7 @@ public sealed class MainForm : Form
     private readonly Dictionary<string, bool> _fullscreenIgnoreMap = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, bool> _displayAutoModes = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _processTargetDisplayOverrides = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<int, PendingStartEventInfo> _pendingStartEvents = new();
     private readonly System.Windows.Forms.Timer _monitorTimer = new();
     private readonly System.Windows.Forms.Timer _eventBurstTimer = new();
     private readonly System.Windows.Forms.Timer _displayRefreshTimer = new();
@@ -71,6 +85,7 @@ public sealed class MainForm : Form
     private bool _suppressMatchTargetEvents;
     private bool _hasUnsavedChanges;
     private bool _refreshInFlight;
+    private bool _snapshotRefreshPending;
     private bool _displayTargetOptionsRefreshPending;
     private string _displayTargetOptionsFingerprint = string.Empty;
     private string _displayTopologyFingerprint = string.Empty;
@@ -78,6 +93,7 @@ public sealed class MainForm : Form
     private bool _monitoringActive;
     private bool _eventStreamAvailable;
     private bool _exitRequested;
+    private long _snapshotRequestSequence;
     private int? _loadedMainSplitterDistance;
     private int? _loadedRuntimeTopSplitterDistance;
     private int? _loadedRuntimeBottomSplitterDistance;
@@ -199,7 +215,7 @@ public sealed class MainForm : Form
         reloadButton.Click += (_, _) =>
         {
             LoadConfigurationFromDisk();
-            _ = RefreshSnapshotAsync();
+            _ = RefreshSnapshotAsync("reload-config");
         };
 
         _startButton = new Button { Text = "Start Monitor", AutoSize = true };
@@ -209,7 +225,7 @@ public sealed class MainForm : Form
         _stopButton.Click += (_, _) => StopMonitoring();
 
         var refreshButton = new Button { Text = "Refresh Now", AutoSize = true };
-        refreshButton.Click += (_, _) => _ = RefreshSnapshotAsync();
+        refreshButton.Click += (_, _) => _ = RefreshSnapshotAsync("manual-refresh-button");
 
         _pollLabel = new Label
         {
@@ -269,7 +285,7 @@ public sealed class MainForm : Form
         _monitorAllFullscreenCheck.CheckedChanged += (_, _) =>
         {
             MarkDirty();
-            _ = RefreshSnapshotAsync();
+            _ = RefreshSnapshotAsync("monitor-all-fullscreen-changed");
         };
 
         _switchAllDisplaysCheck = new CheckBox
@@ -281,12 +297,12 @@ public sealed class MainForm : Form
         _switchAllDisplaysCheck.CheckedChanged += (_, _) =>
         {
             MarkDirty();
-            _ = RefreshSnapshotAsync();
+            _ = RefreshSnapshotAsync("switch-all-displays-changed");
         };
 
         _autoRequestAdminCheck = new CheckBox
         {
-            Text = "Auto request admin for trace (next launch)",
+            Text = "Auto request admin for trace (better performance)",
             AutoSize = true,
             Margin = new Padding(12, 4, 0, 0)
         };
@@ -737,7 +753,7 @@ public sealed class MainForm : Form
     private void WireUpEvents()
     {
         _monitorTimer.Interval = 2000;
-        _monitorTimer.Tick += async (_, _) => await RefreshSnapshotAsync();
+        _monitorTimer.Tick += async (_, _) => await RefreshSnapshotAsync("poll-timer");
         _displayRefreshTimer.Interval = DisplayRefreshIntervalMs;
         _displayRefreshTimer.Tick += async (_, _) =>
         {
@@ -756,11 +772,13 @@ public sealed class MainForm : Form
             if (_eventBurstRemaining <= 0)
             {
                 _eventBurstTimer.Stop();
+                AppLogger.Info("Event burst timer completed.");
                 return;
             }
 
             _eventBurstRemaining--;
-            _ = RefreshSnapshotAsync();
+            AppLogger.Info($"Event burst tick. remaining={_eventBurstRemaining}");
+            _ = RefreshSnapshotAsync("event-burst-timer");
         };
         _processEventMonitor.ProcessEventReceived += ProcessEventMonitorOnProcessEventReceived;
         _processEventMonitor.StreamModeChanged += ProcessEventMonitorOnStreamModeChanged;
@@ -937,10 +955,12 @@ public sealed class MainForm : Form
         _eventStreamAvailable = EnsureProcessEventsStarted();
         _monitoringActive = true;
         ApplyPollingMode();
+        AppLogger.Info(
+            $"Monitoring started. pollingEnabled={_pollingEnabledCheck.Checked}; pollIntervalMs={_monitorTimer.Interval}; eventMode={_processEventMonitor.CurrentMode}");
         _startButton.Enabled = false;
         _stopButton.Enabled = true;
         SetMonitorStatus(GetMonitoringModeLabel());
-        _ = RefreshSnapshotAsync();
+        _ = RefreshSnapshotAsync("start-monitoring");
     }
 
     private void StopMonitoring()
@@ -949,6 +969,8 @@ public sealed class MainForm : Form
         _monitoringActive = false;
         _monitorTimer.Stop();
         _eventBurstTimer.Stop();
+        _snapshotRefreshPending = false;
+        _pendingStartEvents.Clear();
         _processEventMonitor.Stop();
         _startButton.Enabled = true;
         _stopButton.Enabled = false;
@@ -956,17 +978,25 @@ public sealed class MainForm : Form
         _ = RefreshDisplaySnapshotAsync();
     }
 
-    private async Task RefreshSnapshotAsync()
+    private async Task RefreshSnapshotAsync(string reason, ProcessEventNotification? triggerEvent = null)
     {
+        var requestId = Interlocked.Increment(ref _snapshotRequestSequence);
         if (_refreshInFlight)
         {
+            _snapshotRefreshPending = true;
+            AppLogger.Info(
+                $"Snapshot refresh queued. requestId={requestId}; reason={reason}; pending=true; triggerSeq={DescribeTriggerSequence(triggerEvent)}");
             return;
         }
 
         _refreshInFlight = true;
+        var startedAtUtc = DateTimeOffset.UtcNow;
+        var stopwatch = Stopwatch.StartNew();
         try
         {
             var rules = BuildRulesFromUi(commitEdits: false);
+            AppLogger.Info(
+                $"Snapshot refresh start. requestId={requestId}; reason={reason}; rules={rules.Count}; monitorAllFullscreen={_monitorAllFullscreenCheck.Checked}; switchAllDisplays={_switchAllDisplaysCheck.Checked}; trigger={DescribeTrigger(triggerEvent)}");
             var snapshot = await Task.Run(
                 () => _monitorService.Evaluate(
                     rules,
@@ -975,15 +1005,29 @@ public sealed class MainForm : Form
                     _switchAllDisplaysCheck.Checked,
                     _displayAutoModes,
                     _processTargetDisplayOverrides));
+            stopwatch.Stop();
+            AppLogger.Info(
+                $"Snapshot refresh evaluated. requestId={requestId}; reason={reason}; durationMs={stopwatch.Elapsed.TotalMilliseconds:F3}; processes={snapshot.ProcessCount}; matches={snapshot.Matches.Count}; fullscreen={snapshot.FullscreenProcesses.Count}; displays={snapshot.Displays.Count}");
             ApplySnapshot(snapshot, rules.Count);
+            LogMatchedStartEventLatencies(snapshot, startedAtUtc);
         }
         catch (Exception ex)
         {
+            stopwatch.Stop();
+            AppLogger.Error(
+                $"Snapshot refresh failed. requestId={requestId}; reason={reason}; durationMs={stopwatch.Elapsed.TotalMilliseconds:F3}",
+                ex);
             SetMonitorStatus($"Monitor error: {ex.Message}");
         }
         finally
         {
             _refreshInFlight = false;
+            if (_snapshotRefreshPending)
+            {
+                _snapshotRefreshPending = false;
+                AppLogger.Info($"Executing queued snapshot refresh after requestId={requestId}.");
+                _ = RefreshSnapshotAsync("queued-after-inflight");
+            }
         }
     }
 
@@ -1014,7 +1058,7 @@ public sealed class MainForm : Form
             _refreshInFlight = false;
             if (_monitoringActive)
             {
-                _ = RefreshSnapshotAsync();
+                _ = RefreshSnapshotAsync("resume-monitoring-after-display-refresh");
             }
         }
     }
@@ -1392,10 +1436,15 @@ public sealed class MainForm : Form
         }
 
         _nextTraceRecoveryAttemptAt = now.AddSeconds(TraceRecoveryRetrySeconds);
+        AppLogger.Info(
+            $"Attempting background trace recovery. nowUtc={now:O}; nextAttemptUtc={_nextTraceRecoveryAttemptAt:O}");
         if (!_processEventMonitor.TrySwitchToTrace(out var error))
         {
             AppLogger.Warn($"Background trace recovery attempt failed: {error}");
+            return;
         }
+
+        AppLogger.Info("Background trace recovery succeeded.");
     }
 
     private void ApplyPollingMode()
@@ -1622,7 +1671,7 @@ public sealed class MainForm : Form
 
         _fullscreenIgnoreMap[row.IgnoreKey] = row.Ignore;
         MarkDirty();
-        _ = RefreshSnapshotAsync();
+        _ = RefreshSnapshotAsync("fullscreen-ignore-changed");
     }
 
     private async Task HandleDisplayGridValueChangedAsync(int rowIndex, int columnIndex)
@@ -1694,7 +1743,7 @@ public sealed class MainForm : Form
 
         if (_monitoringActive)
         {
-            await RefreshSnapshotAsync();
+            await RefreshSnapshotAsync("match-target-changed");
             return;
         }
 
@@ -1711,7 +1760,7 @@ public sealed class MainForm : Form
 
         if (_monitoringActive)
         {
-            await RefreshSnapshotAsync();
+            await RefreshSnapshotAsync("display-auto-mode-changed");
             return;
         }
 
@@ -1722,20 +1771,31 @@ public sealed class MainForm : Form
     {
         var row = _displayRows[rowIndex];
         var targetEnabled = row.HdrEnabled;
+        AppLogger.Info(
+            $"Manual HDR toggle requested from UI. rowIndex={rowIndex}; display={row.Display}; desired={targetEnabled}; autoModeBefore={row.AutoMode}");
         if (SetDisplayAutoMode(row.Display, isAuto: false))
         {
             MarkDirty();
+            AppLogger.Info($"Manual HDR toggle forced display auto mode off. display={row.Display}");
         }
 
         var success = await Task.Run(() => _monitorService.TrySetDisplayHdr(row.Display, targetEnabled, out var message)
             ? (Ok: true, Message: message)
             : (Ok: false, Message: message));
         var actionPrefix = success.Ok ? "Manual HDR switch succeeded" : "Manual HDR switch failed";
+        if (success.Ok)
+        {
+            AppLogger.Info($"Manual HDR toggle result. display={row.Display}; desired={targetEnabled}; result={success.Message}");
+        }
+        else
+        {
+            AppLogger.Warn($"Manual HDR toggle result. display={row.Display}; desired={targetEnabled}; result={success.Message}");
+        }
         SetMonitorStatus($"{actionPrefix}: {row.Display} | {success.Message}");
 
         if (_monitoringActive)
         {
-            await RefreshSnapshotAsync();
+            await RefreshSnapshotAsync("manual-display-hdr-toggle");
             return;
         }
 
@@ -2184,25 +2244,74 @@ public sealed class MainForm : Form
 
     private void HandleProcessEventOnUiThread(ProcessEventNotification e)
     {
-        if (!_monitoringActive || !ShouldReactToProcessEvent(e))
+        var uiReceivedAtUtc = DateTimeOffset.UtcNow;
+        var eventToUiMs = Math.Max(0D, (uiReceivedAtUtc - e.ReceivedAtUtc).TotalMilliseconds);
+        if (!_monitoringActive)
+        {
+            AppLogger.Info(
+                $"Ignoring process event because monitoring is inactive. seq={e.SequenceId}; type={e.EventType}; pid={e.ProcessId}; name={e.ProcessName}; eventToUiMs={eventToUiMs:F3}");
+            return;
+        }
+
+        TrackStartStopEventForLatency(e);
+        CleanupStalePendingStartEvents();
+
+        var rules = BuildRulesFromUi(commitEdits: false);
+        if (ShouldIgnoreEventForBurst(e, rules))
+        {
+            AppLogger.Info(
+                $"Ignoring noisy process event for burst refresh. seq={e.SequenceId}; type={e.EventType}; pid={e.ProcessId}; name={e.ProcessName}");
+            return;
+        }
+
+        var shouldReact = ShouldReactToProcessEvent(e, rules);
+        var isTraceStartEvent =
+            _processEventMonitor.CurrentMode == ProcessEventStreamMode.Trace &&
+            string.Equals(e.EventType, "start", StringComparison.OrdinalIgnoreCase);
+        var proactiveTraceStartRefresh = !shouldReact && isTraceStartEvent && rules.Count > 0;
+        AppLogger.Info(
+            $"UI process event decision. seq={e.SequenceId}; type={e.EventType}; mode={e.StreamMode}; pid={e.ProcessId}; name={e.ProcessName}; eventClass={e.EventClassName}; deliveryMs={DescribeLatency(e.DeliveryLatencyMs)}; eventToUiMs={eventToUiMs:F3}; shouldReact={shouldReact}; proactiveTraceStartRefresh={proactiveTraceStartRefresh}; rules={rules.Count}; refreshInFlight={_refreshInFlight}; pending={_snapshotRefreshPending}; burstRemaining={_eventBurstRemaining}");
+        if (!shouldReact && !proactiveTraceStartRefresh)
         {
             return;
         }
 
-        _eventBurstRemaining = 6;
+        if (_refreshInFlight && _snapshotRefreshPending)
+        {
+            AppLogger.Info(
+                $"Skipping additional event-triggered refresh scheduling because one refresh is in-flight and one is already queued. seq={e.SequenceId}; type={e.EventType}; pid={e.ProcessId}");
+            return;
+        }
+
+        if (_refreshInFlight)
+        {
+            AppLogger.Info(
+                $"Queueing a single follow-up snapshot refresh for event while refresh is in-flight. seq={e.SequenceId}; type={e.EventType}; pid={e.ProcessId}");
+            _ = RefreshSnapshotAsync($"process-event:{e.EventType}", e);
+            return;
+        }
+
+        var previousBurst = _eventBurstRemaining;
+        var burstRefreshCount = shouldReact
+            ? DefaultEventBurstRefreshCount
+            : TraceStartProactiveRefreshCount;
+        _eventBurstRemaining = Math.Max(_eventBurstRemaining, burstRefreshCount);
+        AppLogger.Info(
+            $"Scheduling event burst refresh. seq={e.SequenceId}; previousBurst={previousBurst}; requestedBurst={burstRefreshCount}; nextBurst={_eventBurstRemaining}");
         _eventBurstTimer.Stop();
         _eventBurstTimer.Start();
-        _ = RefreshSnapshotAsync();
+        _ = RefreshSnapshotAsync($"process-event:{e.EventType}", e);
     }
 
-    private bool ShouldReactToProcessEvent(ProcessEventNotification e)
+    private bool ShouldReactToProcessEvent(
+        ProcessEventNotification e,
+        IReadOnlyCollection<ProcessWatchRule> rules)
     {
         if (_monitorAllFullscreenCheck.Checked)
         {
             return true;
         }
 
-        var rules = BuildRulesFromUi(commitEdits: false);
         if (rules.Count == 0)
         {
             return false;
@@ -2224,6 +2333,177 @@ public sealed class MainForm : Form
             : name + ".exe";
         return ProcessWatchMatcher.IsMatchAny(exeName, rules);
     }
+
+    private static bool ShouldIgnoreEventForBurst(
+        ProcessEventNotification e,
+        IReadOnlyCollection<ProcessWatchRule> rules)
+    {
+        var normalized = NormalizeProcessNameForEventFilter(e.ProcessName);
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return false;
+        }
+
+        if (!IsEventBurstIgnoredProcess(normalized))
+        {
+            return false;
+        }
+
+        // If user explicitly writes a rule for this process name, do not suppress event handling.
+        if (rules.Count > 0 &&
+            (ProcessWatchMatcher.IsMatchAny(e.ProcessName, rules) ||
+             ProcessWatchMatcher.IsMatchAny(normalized + ".exe", rules)))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsEventBurstIgnoredProcess(string normalizedProcessName)
+    {
+        foreach (var prefix in EventBurstIgnoredProcessPrefixes)
+        {
+            if (normalizedProcessName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string NormalizeProcessNameForEventFilter(string processName)
+    {
+        if (string.IsNullOrWhiteSpace(processName))
+        {
+            return string.Empty;
+        }
+
+        var normalized = processName.Trim().ToLowerInvariant();
+        if (normalized.EndsWith(".exe", StringComparison.Ordinal))
+        {
+            normalized = normalized[..^4];
+        }
+
+        while (normalized.EndsWith(".", StringComparison.Ordinal))
+        {
+            normalized = normalized[..^1];
+        }
+
+        return normalized;
+    }
+
+    private void TrackStartStopEventForLatency(ProcessEventNotification e)
+    {
+        if (e.ProcessId <= 0)
+        {
+            return;
+        }
+
+        if (string.Equals(e.EventType, "start", StringComparison.OrdinalIgnoreCase))
+        {
+            _pendingStartEvents[e.ProcessId] = new PendingStartEventInfo(
+                e.SequenceId,
+                e.StreamMode,
+                e.ProcessId,
+                e.ProcessName,
+                e.ReceivedAtUtc,
+                e.EventCreatedAtUtc);
+            AppLogger.Info(
+                $"Tracked start event for latency. seq={e.SequenceId}; pid={e.ProcessId}; name={e.ProcessName}; mode={e.StreamMode}; receivedUtc={e.ReceivedAtUtc:O}; createdUtc={DescribeUtc(e.EventCreatedAtUtc)}");
+            return;
+        }
+
+        if (string.Equals(e.EventType, "stop", StringComparison.OrdinalIgnoreCase) &&
+            _pendingStartEvents.Remove(e.ProcessId, out var pending))
+        {
+            AppLogger.Info(
+                $"Removed pending start event due to stop before match. startSeq={pending.SequenceId}; stopSeq={e.SequenceId}; pid={e.ProcessId}; name={pending.ProcessName}");
+        }
+    }
+
+    private void LogMatchedStartEventLatencies(ProcessMonitorSnapshot snapshot, DateTimeOffset refreshStartedAtUtc)
+    {
+        if (_pendingStartEvents.Count == 0 || snapshot.Matches.Count == 0)
+        {
+            return;
+        }
+
+        var matchedPids = new HashSet<int>(snapshot.Matches.Select(static match => match.ProcessId));
+        foreach (var pid in matchedPids)
+        {
+            if (!_pendingStartEvents.Remove(pid, out var pending))
+            {
+                continue;
+            }
+
+            var fromReceiveMs = Math.Max(0D, (refreshStartedAtUtc - pending.EventReceivedAtUtc).TotalMilliseconds);
+            var fromCreatedMs = pending.EventCreatedAtUtc.HasValue
+                ? Math.Max(0D, (refreshStartedAtUtc - pending.EventCreatedAtUtc.Value).TotalMilliseconds)
+                : (double?)null;
+            AppLogger.Info(
+                $"Match detected for tracked start event. startSeq={pending.SequenceId}; pid={pending.ProcessId}; name={pending.ProcessName}; eventMode={pending.StreamMode}; refreshStartedUtc={refreshStartedAtUtc:O}; eventReceivedUtc={pending.EventReceivedAtUtc:O}; eventCreatedUtc={DescribeUtc(pending.EventCreatedAtUtc)}; eventToRefreshMs={fromReceiveMs:F3}; createdToRefreshMs={DescribeLatency(fromCreatedMs)}");
+        }
+    }
+
+    private void CleanupStalePendingStartEvents()
+    {
+        if (_pendingStartEvents.Count == 0)
+        {
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var stalePids = _pendingStartEvents
+            .Where(pair => (now - pair.Value.EventReceivedAtUtc).TotalSeconds >= PendingStartEventRetentionSeconds)
+            .Select(static pair => pair.Key)
+            .ToArray();
+        if (stalePids.Length == 0)
+        {
+            return;
+        }
+
+        foreach (var stalePid in stalePids)
+        {
+            _pendingStartEvents.Remove(stalePid);
+        }
+
+        AppLogger.Info($"Cleared stale tracked start events. count={stalePids.Length}");
+    }
+
+    private static string DescribeTrigger(ProcessEventNotification? triggerEvent)
+    {
+        if (triggerEvent is null)
+        {
+            return "none";
+        }
+
+        return $"seq={triggerEvent.SequenceId};type={triggerEvent.EventType};pid={triggerEvent.ProcessId};name={triggerEvent.ProcessName};mode={triggerEvent.StreamMode};deliveryMs={DescribeLatency(triggerEvent.DeliveryLatencyMs)}";
+    }
+
+    private static string DescribeTriggerSequence(ProcessEventNotification? triggerEvent)
+    {
+        return triggerEvent is null ? "n/a" : triggerEvent.SequenceId.ToString();
+    }
+
+    private static string DescribeLatency(double? valueMs)
+    {
+        return valueMs.HasValue ? valueMs.Value.ToString("F3") : "n/a";
+    }
+
+    private static string DescribeUtc(DateTimeOffset? timestamp)
+    {
+        return timestamp.HasValue ? timestamp.Value.ToString("O") : "n/a";
+    }
+
+    private sealed record PendingStartEventInfo(
+        long SequenceId,
+        ProcessEventStreamMode StreamMode,
+        int ProcessId,
+        string ProcessName,
+        DateTimeOffset EventReceivedAtUtc,
+        DateTimeOffset? EventCreatedAtUtc);
 
     private sealed record DisplayTargetOption(string Value, string Label);
 }

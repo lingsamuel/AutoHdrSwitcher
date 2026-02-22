@@ -1,3 +1,5 @@
+using AutoHdrSwitcher.Logging;
+
 namespace AutoHdrSwitcher.Display;
 
 internal sealed class HdrController
@@ -69,6 +71,8 @@ internal sealed class HdrController
 
     public bool TrySetHdr(HdrDisplayInfo display, bool enable, out string message)
     {
+        AppLogger.Info(
+            $"DisplayConfigSetAdvancedColorState request. display={display.GdiDeviceName}; target={display.AdapterId.HighPart}:{display.AdapterId.LowPart}:{display.TargetId}; desired={enable}");
         var packet = new NativeDisplay.DisplayConfigSetAdvancedColorState
         {
             Header = new NativeDisplay.DisplayConfigDeviceInfoHeader
@@ -85,10 +89,14 @@ internal sealed class HdrController
         if (setCode != NativeDisplay.ErrorSuccess)
         {
             message = $"Set HDR failed (code {setCode})";
+            AppLogger.Warn(
+                $"DisplayConfigSetAdvancedColorState failed. display={display.GdiDeviceName}; desired={enable}; code={setCode}");
             return false;
         }
 
         message = enable ? "HDR enabled" : "HDR disabled";
+        AppLogger.Info(
+            $"DisplayConfigSetAdvancedColorState succeeded. display={display.GdiDeviceName}; desired={enable}; result={message}");
         return true;
     }
 

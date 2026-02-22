@@ -2,6 +2,7 @@ using System.Management;
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Runtime.ExceptionServices;
+using System.Globalization;
 using AutoHdrSwitcher.Logging;
 
 namespace AutoHdrSwitcher.Monitoring;
@@ -27,6 +28,7 @@ public sealed class ProcessEventMonitor : IDisposable
     private int _mtaThreadId;
     private bool _traceAccessDenied;
     private ProcessEventStreamMode _currentMode = ProcessEventStreamMode.Unavailable;
+    private long _eventSequence;
 
     public event EventHandler<ProcessEventNotification>? ProcessEventReceived;
     public event EventHandler? StreamModeChanged;
@@ -129,6 +131,7 @@ public sealed class ProcessEventMonitor : IDisposable
 
         _traceAccessDenied = false;
         AppLogger.Info("Starting process event stream.");
+        AppLogger.Info($"Trying trace watcher pair. startQuery={StartTraceQuery}; stopQuery={StopTraceQuery}");
         if (TryCreateAndStartWatchers(
                 StartTraceQuery,
                 StopTraceQuery,
@@ -154,6 +157,7 @@ public sealed class ProcessEventMonitor : IDisposable
         }
 
         AppLogger.Warn($"Trace event stream start failed. {traceError}");
+        AppLogger.Info($"Trying instance watcher pair. startQuery={StartInstanceQuery}; stopQuery={StopInstanceQuery}");
         if (TryCreateAndStartWatchers(
                 StartInstanceQuery,
                 StopInstanceQuery,
@@ -257,6 +261,7 @@ public sealed class ProcessEventMonitor : IDisposable
         ManagementScope? localScope = null;
         try
         {
+            AppLogger.Info($"Creating watcher pair. startQuery={startQuery}; stopQuery={stopQuery}");
             var options = new ConnectionOptions
             {
                 Impersonation = ImpersonationLevel.Impersonate,
@@ -264,6 +269,7 @@ public sealed class ProcessEventMonitor : IDisposable
             };
             localScope = new ManagementScope(ScopePath, options);
             localScope.Connect();
+            AppLogger.Info($"WMI scope connected: {ScopePath}");
 
             localStartWatcher = new ManagementEventWatcher(localScope, new WqlEventQuery(startQuery));
             localStopWatcher = new ManagementEventWatcher(localScope, new WqlEventQuery(stopQuery));
@@ -273,6 +279,7 @@ public sealed class ProcessEventMonitor : IDisposable
 
             localStartWatcher.Start();
             localStopWatcher.Start();
+            AppLogger.Info($"Watcher pair started successfully. startQuery={startQuery}; stopQuery={stopQuery}");
 
             startWatcher = localStartWatcher;
             stopWatcher = localStopWatcher;
@@ -293,36 +300,67 @@ public sealed class ProcessEventMonitor : IDisposable
 
     private void HandleEvent(string eventType, EventArrivedEventArgs args)
     {
+        var receivedAtUtc = DateTimeOffset.UtcNow;
+        var sequenceId = Interlocked.Increment(ref _eventSequence);
         try
         {
-            if (!TryReadProcessInfo(args.NewEvent, out var processId, out var processName))
+            if (!TryReadProcessInfo(
+                    args.NewEvent,
+                    out var processId,
+                    out var processName,
+                    out var eventClassName,
+                    out var eventCreatedAtUtc,
+                    out var deliveryLatencyMs))
             {
+                AppLogger.Warn(
+                    $"Ignoring malformed WMI event. seq={sequenceId}; type={eventType}; mode={_currentMode}; eventClass={eventClassName}");
                 return;
             }
 
+            AppLogger.Info(
+                $"WMI event received. seq={sequenceId}; type={eventType}; mode={_currentMode}; class={eventClassName}; pid={processId}; name={processName}; createdUtc={FormatUtc(eventCreatedAtUtc)}; receivedUtc={receivedAtUtc:O}; deliveryMs={FormatLatency(deliveryLatencyMs)}");
             ProcessEventReceived?.Invoke(this, new ProcessEventNotification
             {
                 EventType = eventType,
                 ProcessId = processId,
-                ProcessName = processName
+                ProcessName = processName,
+                SequenceId = sequenceId,
+                StreamMode = _currentMode,
+                ReceivedAtUtc = receivedAtUtc,
+                EventCreatedAtUtc = eventCreatedAtUtc,
+                DeliveryLatencyMs = deliveryLatencyMs,
+                EventClassName = eventClassName
             });
         }
-        catch
+        catch (Exception ex)
         {
-            // Ignore malformed event payloads.
+            AppLogger.Error($"Failed to handle WMI event. seq={sequenceId}; type={eventType}; mode={_currentMode}", ex);
         }
     }
 
     private static bool TryReadProcessInfo(
         ManagementBaseObject? eventData,
         out int processId,
-        out string processName)
+        out string processName,
+        out string eventClassName,
+        out DateTimeOffset? eventCreatedAtUtc,
+        out double? deliveryLatencyMs)
     {
         processId = 0;
         processName = string.Empty;
+        eventClassName = string.Empty;
+        eventCreatedAtUtc = null;
+        deliveryLatencyMs = null;
         if (eventData is null)
         {
             return false;
+        }
+
+        eventClassName = Convert.ToString(GetPropertyValue(eventData, "__CLASS")) ?? string.Empty;
+        eventCreatedAtUtc = GetEventCreatedAtUtc(eventData);
+        if (eventCreatedAtUtc.HasValue)
+        {
+            deliveryLatencyMs = Math.Max(0D, (DateTimeOffset.UtcNow - eventCreatedAtUtc.Value).TotalMilliseconds);
         }
 
         if (TryReadDirectEventInfo(eventData, out processId, out processName))
@@ -410,6 +448,64 @@ public sealed class ProcessEventMonitor : IDisposable
         {
             return 0;
         }
+    }
+
+    private static DateTimeOffset? GetEventCreatedAtUtc(ManagementBaseObject eventData)
+    {
+        var raw = GetPropertyValue(eventData, "TIME_CREATED");
+        return ParseWmiTimeCreatedToUtc(raw);
+    }
+
+    private static DateTimeOffset? ParseWmiTimeCreatedToUtc(object? value)
+    {
+        if (value is null)
+        {
+            return null;
+        }
+
+        ulong fileTimeUtc;
+        switch (value)
+        {
+            case ulong unsignedValue:
+                fileTimeUtc = unsignedValue;
+                break;
+            case long signedValue when signedValue > 0:
+                fileTimeUtc = (ulong)signedValue;
+                break;
+            case string text when ulong.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed):
+                fileTimeUtc = parsed;
+                break;
+            default:
+                return null;
+        }
+
+        if (fileTimeUtc == 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            return new DateTimeOffset(DateTime.FromFileTimeUtc((long)fileTimeUtc));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string FormatUtc(DateTimeOffset? value)
+    {
+        return value.HasValue
+            ? value.Value.ToString("O")
+            : "n/a";
+    }
+
+    private static string FormatLatency(double? value)
+    {
+        return value.HasValue
+            ? value.Value.ToString("F3", CultureInfo.InvariantCulture)
+            : "n/a";
     }
 
     private void DisposeWatchersCore()
