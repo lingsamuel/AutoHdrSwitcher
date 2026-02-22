@@ -29,5 +29,7 @@ public sealed class WatchConfiguration
 
     public Dictionary<string, bool> DisplayAutoModes { get; init; } = new();
 
+    public Dictionary<string, string> ProcessTargetDisplayOverrides { get; init; } = new();
+
     public List<ProcessWatchRule> ProcessRules { get; init; } = new();
 }

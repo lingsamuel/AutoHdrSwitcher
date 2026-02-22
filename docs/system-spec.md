@@ -28,6 +28,7 @@ Each watch rule row has:
 3. `caseSensitive`
 4. `regexMode`
 5. `enabled`
+6. `targetDisplay` (optional; omitted = `Default`)
 
 Matching behavior:
 
@@ -46,9 +47,11 @@ Candidate strings checked for each process:
 
 For each matched process:
 
-1. Resolve process main window display via window enumeration.
-2. If display is not yet resolvable but a match exists, fallback target is the primary display.
-3. Re-resolve on subsequent refreshes and move target to the actual display when available.
+1. Resolve effective target by priority: process-level override (`processTargetDisplayOverrides`) > rule-level `targetDisplay` > `Default`.
+2. `Default` means: use window display; if not resolvable, fallback target is the primary display.
+3. `Switch All Displays` means this match requests HDR desired state for all displays (without requiring global `switchAllDisplaysTogether`).
+4. If effective target is a concrete display and currently available, force that display.
+5. If effective target is currently unavailable, keep stored value but treat runtime target as `Default`.
 
 ### 3.3 Fullscreen Monitoring
 
@@ -96,9 +99,10 @@ Display runtime table columns:
 1. `Display`
 2. `Monitor`
 3. `Supported`
-4. `HDR On`
-5. `Desired`
-6. `Action`
+4. `Auto`
+5. `HDR On`
+6. `Desired`
+7. `Action`
 
 ### 3.6 Monitoring Model
 

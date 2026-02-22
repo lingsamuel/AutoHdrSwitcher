@@ -1,7 +1,11 @@
+using System.Text.Json.Serialization;
+
 namespace AutoHdrSwitcher.Matching;
 
 public sealed class ProcessWatchRule
 {
+    public const string SwitchAllDisplaysTargetValue = "__ALL_DISPLAYS__";
+
     // Process name/path pattern. Example: "game", "*.exe", "^eldenring.*$"
     public string Pattern { get; init; } = string.Empty;
 
@@ -16,4 +20,8 @@ public sealed class ProcessWatchRule
 
     // Optional on/off switch per row.
     public bool Enabled { get; init; } = true;
+
+    // Optional preferred target display. Null/empty means "Default".
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? TargetDisplay { get; init; }
 }

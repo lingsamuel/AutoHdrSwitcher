@@ -21,7 +21,6 @@ public sealed class ProcessMonitorService
 
     private readonly ProcessDisplayResolver _displayResolver = new();
     private readonly HdrController _hdrController = new();
-    private readonly DisplayWindowPredictionCache _displayPredictionCache = new();
 
     public static string DefaultWindowsPathPrefixIgnoreKey { get; } =
         BuildPathPrefixIgnoreKey(DefaultWindowsPathPrefix);
@@ -29,15 +28,17 @@ public sealed class ProcessMonitorService
     public static IReadOnlyList<string> DefaultIgnoreKeys { get; } = BuildDefaultIgnoreKeys();
 
     public ProcessMonitorSnapshot Evaluate(
-        IReadOnlyCollection<ProcessWatchRule> rules,
+        IReadOnlyList<ProcessWatchRule> rules,
         bool monitorAllFullscreenProcesses,
         IReadOnlyDictionary<string, bool> fullscreenIgnoreMap,
         bool switchAllDisplaysTogether,
-        IReadOnlyDictionary<string, bool> displayAutoModes)
+        IReadOnlyDictionary<string, bool> displayAutoModes,
+        IReadOnlyDictionary<string, string> processTargetDisplayOverrides)
     {
         ArgumentNullException.ThrowIfNull(rules);
         ArgumentNullException.ThrowIfNull(fullscreenIgnoreMap);
         ArgumentNullException.ThrowIfNull(displayAutoModes);
+        ArgumentNullException.ThrowIfNull(processTargetDisplayOverrides);
 
         var processArray = Process.GetProcesses();
         var resolvedWindows = _displayResolver.CaptureProcessWindows();
@@ -47,7 +48,8 @@ public sealed class ProcessMonitorService
         var matchedDisplays = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var processNames = new Dictionary<int, string>();
         var processPaths = new Dictionary<int, string>();
-        var enableAllDisplaysByPredictionFallback = false;
+        var availableDisplays = BuildAvailableDisplaySet();
+        var forceSwitchAllDisplaysByTarget = false;
 
         foreach (var process in processArray)
         {
@@ -64,11 +66,10 @@ public sealed class ProcessMonitorService
                         executablePath = discoveredPath;
                         processPaths[processId] = discoveredPath;
                     }
-                    var predictionKeys = BuildPredictionKeys(safeName, executablePath);
 
                     foreach (var candidate in BuildCandidates(process))
                     {
-                        if (!ProcessWatchMatcher.TryFindFirstMatch(candidate, rules, out var matchedRule))
+                        if (!TryFindFirstMatchingRule(candidate, rules, out var matchedRule, out var matchedRuleIndex))
                         {
                             continue;
                         }
@@ -78,51 +79,41 @@ public sealed class ProcessMonitorService
                             break;
                         }
 
-                        var display = ResolveDisplay(
+                        var targetResolution = ResolveDisplayForRule(
                             processId,
                             resolvedWindows,
-                            matchedDisplays,
-                            out var isFullscreenLike,
-                            out var hasResolvedDisplay);
-                        if (hasResolvedDisplay)
+                            ResolveEffectiveTargetDisplay(
+                                safeName,
+                                executablePath,
+                                matchedRule.TargetDisplay,
+                                processTargetDisplayOverrides,
+                                out var processTargetKey,
+                                out var hasProcessTargetOverride),
+                            availableDisplays);
+                        if (!string.IsNullOrWhiteSpace(targetResolution.DesiredDisplay))
                         {
-                            if (ShouldRecordPredictionCacheForProcess(
-                                    safeName,
-                                    executablePath,
-                                    isFullscreenLike,
-                                    fullscreenIgnoreMap))
-                            {
-                                _displayPredictionCache.RecordDisplay(predictionKeys, display);
-                            }
+                            matchedDisplays.Add(targetResolution.DesiredDisplay);
                         }
-                        else
+                        if (targetResolution.RequestAllDisplays)
                         {
-                            var predictedDisplays = _displayPredictionCache.GetPredictedDisplays(predictionKeys);
-                            if (predictedDisplays.Count > 0)
-                            {
-                                foreach (var predictedDisplay in predictedDisplays)
-                                {
-                                    matchedDisplays.Add(predictedDisplay);
-                                }
-
-                                display = $"(pending -> predicted {string.Join(", ", predictedDisplays)})";
-                            }
-                            else
-                            {
-                                display = "(pending -> all displays)";
-                                enableAllDisplaysByPredictionFallback = true;
-                            }
+                            forceSwitchAllDisplaysByTarget = true;
                         }
 
                         matches.Add(new ProcessMatchResult
                         {
+                            RuleIndex = matchedRuleIndex,
+                            ProcessTargetKey = processTargetKey,
+                            HasProcessTargetOverride = hasProcessTargetOverride,
                             ProcessId = processId,
                             ProcessName = safeName,
                             MatchInput = candidate,
-                            RulePattern = matchedRule!.Pattern,
+                            RulePattern = matchedRule.Pattern,
                             Mode = DescribeMode(matchedRule),
-                            Display = display,
-                            IsFullscreenLike = isFullscreenLike
+                            Display = targetResolution.DisplayLabel,
+                            IsFullscreenLike = targetResolution.IsFullscreenLike,
+                            EffectiveTargetDisplay = string.IsNullOrWhiteSpace(targetResolution.ConfiguredTargetDisplay)
+                                ? null
+                                : targetResolution.ConfiguredTargetDisplay
                         });
                         break;
                     }
@@ -151,12 +142,6 @@ public sealed class ProcessMonitorService
                 out var ignoreKey,
                 out var isIgnored,
                 out var isDefaultIgnoreApplied);
-            if (!isIgnored)
-            {
-                _displayPredictionCache.RecordDisplay(
-                    BuildPredictionKeys(name, executablePath),
-                    window.GdiDeviceName);
-            }
             var matchedByRule = matchedPids.Contains(window.ProcessId);
             fullscreenProcesses.Add(new FullscreenProcessInfo
             {
@@ -180,7 +165,7 @@ public sealed class ProcessMonitorService
             matchedDisplays,
             switchAllDisplaysTogether,
             displayAutoModes,
-            enableAllDisplaysByPredictionFallback);
+            forceSwitchAllDisplaysByTarget);
         matches.Sort(static (a, b) => a.ProcessName.CompareTo(b.ProcessName));
         fullscreenProcesses.Sort(static (a, b) =>
         {
@@ -200,11 +185,6 @@ public sealed class ProcessMonitorService
             FullscreenProcesses = fullscreenProcesses,
             Displays = displayStatuses
         };
-    }
-
-    public void FlushPredictionCache()
-    {
-        _displayPredictionCache.Flush();
     }
 
     public IReadOnlyList<HdrDisplayStatus> GetLiveDisplayHdrStates(
@@ -348,49 +328,210 @@ public sealed class ProcessMonitorService
         return rule.CaseSensitive ? "includes-or-wildcard/case-sensitive" : "includes-or-wildcard/case-insensitive";
     }
 
-    private string ResolveDisplay(
-        int processId,
-        IReadOnlyDictionary<int, ResolvedProcessWindow> resolvedWindows,
-        HashSet<string> matchedDisplays,
-        out bool isFullscreenLike,
-        out bool hasResolvedDisplay)
+    private static bool TryFindFirstMatchingRule(
+        string candidate,
+        IReadOnlyList<ProcessWatchRule> rules,
+        out ProcessWatchRule matchedRule,
+        out int ruleIndex)
     {
-        if (!resolvedWindows.TryGetValue(processId, out var resolved))
+        for (var i = 0; i < rules.Count; i++)
         {
-            hasResolvedDisplay = false;
-            isFullscreenLike = false;
-            return "(window not found)";
+            var rule = rules[i];
+            if (!ProcessWatchMatcher.IsMatch(candidate, rule))
+            {
+                continue;
+            }
+
+            matchedRule = rule;
+            ruleIndex = i;
+            return true;
         }
 
-        var gdiName = resolved.GdiDeviceName;
-        isFullscreenLike = resolved.IsFullscreenLike;
-        hasResolvedDisplay = true;
-        matchedDisplays.Add(gdiName);
-        return gdiName;
+        matchedRule = null!;
+        ruleIndex = -1;
+        return false;
+    }
+
+    private HashSet<string> BuildAvailableDisplaySet()
+    {
+        var displays = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var display in _hdrController.GetDisplays())
+        {
+            if (!string.IsNullOrWhiteSpace(display.GdiDeviceName))
+            {
+                displays.Add(display.GdiDeviceName);
+            }
+        }
+
+        foreach (var screen in Screen.AllScreens)
+        {
+            if (!string.IsNullOrWhiteSpace(screen.DeviceName))
+            {
+                displays.Add(screen.DeviceName);
+            }
+        }
+
+        return displays;
+    }
+
+    private DisplayTargetResolution ResolveDisplayForRule(
+        int processId,
+        IReadOnlyDictionary<int, ResolvedProcessWindow> resolvedWindows,
+        string? configuredTargetDisplay,
+        IReadOnlySet<string> availableDisplays)
+    {
+        var configured = string.IsNullOrWhiteSpace(configuredTargetDisplay)
+            ? null
+            : configuredTargetDisplay.Trim();
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            if (string.Equals(
+                    configured,
+                    ProcessWatchRule.SwitchAllDisplaysTargetValue,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                var isFullscreenLike = resolvedWindows.TryGetValue(processId, out var allWindow) &&
+                    allWindow.IsFullscreenLike;
+                var displayLabel = allWindow is null
+                    ? "(switch all displays)"
+                    : $"{allWindow.GdiDeviceName} (switch all displays)";
+                return new DisplayTargetResolution
+                {
+                    DesiredDisplay = null,
+                    ConfiguredTargetDisplay = ProcessWatchRule.SwitchAllDisplaysTargetValue,
+                    DisplayLabel = displayLabel,
+                    IsFullscreenLike = isFullscreenLike,
+                    RequestAllDisplays = true
+                };
+            }
+
+            if (availableDisplays.Contains(configured))
+            {
+                var isFullscreenLike = resolvedWindows.TryGetValue(processId, out var forcedWindow) &&
+                    forcedWindow.IsFullscreenLike;
+                var displayLabel = forcedWindow is null
+                    ? $"(forced target: {configured})"
+                    : $"{forcedWindow.GdiDeviceName} (forced target: {configured})";
+                return new DisplayTargetResolution
+                {
+                    DesiredDisplay = configured,
+                    ConfiguredTargetDisplay = configured,
+                    DisplayLabel = displayLabel,
+                    IsFullscreenLike = isFullscreenLike,
+                    RequestAllDisplays = false
+                };
+            }
+
+            var fallback = ResolveDefaultDisplay(processId, resolvedWindows);
+            var fallbackLabel = fallback.DisplayLabel;
+            if (string.IsNullOrWhiteSpace(fallbackLabel))
+            {
+                fallbackLabel = "(window not found)";
+            }
+
+            return new DisplayTargetResolution
+            {
+                DesiredDisplay = fallback.DesiredDisplay,
+                ConfiguredTargetDisplay = configured,
+                DisplayLabel = $"{fallbackLabel} (target unavailable: {configured}; using Default)",
+                IsFullscreenLike = fallback.IsFullscreenLike,
+                RequestAllDisplays = false
+            };
+        }
+
+        return ResolveDefaultDisplay(processId, resolvedWindows);
+    }
+
+    private DisplayTargetResolution ResolveDefaultDisplay(
+        int processId,
+        IReadOnlyDictionary<int, ResolvedProcessWindow> resolvedWindows)
+    {
+        if (resolvedWindows.TryGetValue(processId, out var resolved))
+        {
+            return new DisplayTargetResolution
+            {
+                DesiredDisplay = resolved.GdiDeviceName,
+                ConfiguredTargetDisplay = null,
+                DisplayLabel = resolved.GdiDeviceName,
+                IsFullscreenLike = resolved.IsFullscreenLike,
+                RequestAllDisplays = false
+            };
+        }
+
+        if (_displayResolver.TryGetPrimaryDisplay(out var primaryDisplay) &&
+            !string.IsNullOrWhiteSpace(primaryDisplay))
+        {
+            return new DisplayTargetResolution
+            {
+                DesiredDisplay = primaryDisplay,
+                ConfiguredTargetDisplay = null,
+                DisplayLabel = $"(window not found -> primary {primaryDisplay})",
+                IsFullscreenLike = false,
+                RequestAllDisplays = false
+            };
+        }
+
+        return new DisplayTargetResolution
+        {
+            DesiredDisplay = null,
+            ConfiguredTargetDisplay = null,
+            DisplayLabel = "(window not found)",
+            IsFullscreenLike = false,
+            RequestAllDisplays = false
+        };
+    }
+
+    private static string? ResolveEffectiveTargetDisplay(
+        string processName,
+        string? executablePath,
+        string? ruleTargetDisplay,
+        IReadOnlyDictionary<string, string> processTargetDisplayOverrides,
+        out string processTargetKey,
+        out bool hasProcessTargetOverride)
+    {
+        ResolveProcessTargetDisplayOverride(
+            processName,
+            executablePath,
+            processTargetDisplayOverrides,
+            out processTargetKey,
+            out var overrideTargetDisplay,
+            out hasProcessTargetOverride);
+        if (!string.IsNullOrWhiteSpace(overrideTargetDisplay))
+        {
+            return overrideTargetDisplay;
+        }
+
+        if (string.IsNullOrWhiteSpace(ruleTargetDisplay))
+        {
+            return null;
+        }
+
+        return ruleTargetDisplay.Trim();
     }
 
     private List<HdrDisplayStatus> EvaluateDisplayHdrStates(
         HashSet<string> matchedDisplays,
         bool switchAllDisplaysTogether,
         IReadOnlyDictionary<string, bool> displayAutoModes,
-        bool enableAllDisplaysByPredictionFallback)
+        bool forceSwitchAllDisplaysByTarget)
     {
         var statuses = new List<HdrDisplayStatus>();
         var displays = _hdrController.GetDisplays();
         var coveredDisplays = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var desiredForAllDisplays = switchAllDisplaysTogether && matchedDisplays.Count > 0;
+        var desiredForAllDisplays =
+            (switchAllDisplaysTogether && matchedDisplays.Count > 0) ||
+            forceSwitchAllDisplaysByTarget;
         foreach (var display in displays)
         {
             var isAuto = ResolveDisplayAutoMode(display.GdiDeviceName, displayAutoModes);
             var desired = isAuto
                 ? display.IsHdrSupported &&
-                    (enableAllDisplaysByPredictionFallback ||
-                     desiredForAllDisplays ||
+                    (desiredForAllDisplays ||
                      matchedDisplays.Contains(display.GdiDeviceName))
                 : display.IsHdrEnabled;
             var hdrEnabled = display.IsHdrEnabled;
             var action = isAuto
-                ? (enableAllDisplaysByPredictionFallback ? "No change (fallback all displays)" : "No change (Auto=true)")
+                ? "No change (Auto=true)"
                 : "Skipped auto control (Auto=false)";
 
             if (!display.IsHdrSupported)
@@ -437,8 +578,7 @@ public sealed class ProcessMonitorService
                 IsHdrSupported = false,
                 IsHdrEnabled = false,
                 DesiredHdrEnabled = ResolveDisplayAutoMode(screen.DeviceName, displayAutoModes) &&
-                    (enableAllDisplaysByPredictionFallback ||
-                     desiredForAllDisplays ||
+                    (desiredForAllDisplays ||
                      matchedDisplays.Contains(screen.DeviceName)),
                 LastAction = "Display detected; HDR state unavailable"
             });
@@ -453,27 +593,6 @@ public sealed class ProcessMonitorService
         IReadOnlyDictionary<string, bool> displayAutoModes)
     {
         return !displayAutoModes.TryGetValue(displayName, out var autoMode) || autoMode;
-    }
-
-    private static IReadOnlyList<string> BuildPredictionKeys(string processName, string? executablePath)
-    {
-        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        var normalizedName = processName.Trim();
-        if (!string.IsNullOrWhiteSpace(normalizedName) &&
-            !normalizedName.StartsWith("PID-", StringComparison.OrdinalIgnoreCase) &&
-            !normalizedName.StartsWith("<", StringComparison.Ordinal))
-        {
-            keys.Add($"name:{normalizedName}");
-        }
-
-        if (!string.IsNullOrWhiteSpace(executablePath))
-        {
-            var normalizedPath = NormalizePath(executablePath);
-            keys.Add($"path:{normalizedPath}");
-        }
-
-        return keys.ToArray();
     }
 
     private static bool TryGetExecutablePath(Process process, out string executablePath)
@@ -554,25 +673,67 @@ public sealed class ProcessMonitorService
         isDefaultIgnoreApplied = defaultIgnored;
     }
 
-    private static bool ShouldRecordPredictionCacheForProcess(
+    private static void ResolveProcessTargetDisplayOverride(
         string processName,
         string? executablePath,
-        bool isFullscreenLike,
-        IReadOnlyDictionary<string, bool> fullscreenIgnoreMap)
+        IReadOnlyDictionary<string, string> processTargetDisplayOverrides,
+        out string key,
+        out string? targetDisplay,
+        out bool hasOverride)
     {
-        if (!isFullscreenLike)
+        var pathKey = string.IsNullOrWhiteSpace(executablePath)
+            ? string.Empty
+            : BuildProcessTargetPathKey(executablePath);
+        if (!string.IsNullOrWhiteSpace(pathKey) &&
+            processTargetDisplayOverrides.TryGetValue(pathKey, out var pathValue) &&
+            !string.IsNullOrWhiteSpace(pathValue))
         {
-            return true;
+            key = pathKey;
+            targetDisplay = pathValue.Trim();
+            hasOverride = true;
+            return;
         }
 
-        ResolveIgnoreState(
-            processName,
-            executablePath,
-            fullscreenIgnoreMap,
-            out _,
-            out var isIgnored,
-            out _);
-        return !isIgnored;
+        var nameKey = IsValidProcessNameForTargetKey(processName)
+            ? BuildProcessTargetNameKey(processName)
+            : string.Empty;
+        if (!string.IsNullOrWhiteSpace(nameKey) &&
+            processTargetDisplayOverrides.TryGetValue(nameKey, out var nameValue) &&
+            !string.IsNullOrWhiteSpace(nameValue))
+        {
+            key = nameKey;
+            targetDisplay = nameValue.Trim();
+            hasOverride = true;
+            return;
+        }
+
+        key = !string.IsNullOrWhiteSpace(pathKey)
+            ? pathKey
+            : nameKey;
+        targetDisplay = null;
+        hasOverride = false;
+    }
+
+    private static bool IsValidProcessNameForTargetKey(string processName)
+    {
+        if (string.IsNullOrWhiteSpace(processName))
+        {
+            return false;
+        }
+
+        var normalized = processName.Trim();
+        return !normalized.StartsWith("<", StringComparison.Ordinal) &&
+            !normalized.StartsWith("PID-", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static string BuildProcessTargetPathKey(string executablePath)
+    {
+        return $"path:{NormalizePath(executablePath)}";
+    }
+
+    public static string BuildProcessTargetNameKey(string processName)
+    {
+        return $"name:{processName.Trim()}";
     }
 
     public static string BuildPathIgnoreKey(string executablePath)
@@ -656,5 +817,18 @@ public sealed class ProcessMonitorService
     private static string NormalizePath(string path)
     {
         return path.Trim().Replace('/', '\\');
+    }
+
+    private sealed class DisplayTargetResolution
+    {
+        public string? DesiredDisplay { get; init; }
+
+        public string? ConfiguredTargetDisplay { get; init; }
+
+        public required string DisplayLabel { get; init; }
+
+        public required bool IsFullscreenLike { get; init; }
+
+        public required bool RequestAllDisplays { get; init; }
     }
 }

@@ -2,6 +2,12 @@ namespace AutoHdrSwitcher.Monitoring;
 
 public sealed class ProcessMatchResult
 {
+    public required int RuleIndex { get; init; }
+
+    public required string ProcessTargetKey { get; init; }
+
+    public required bool HasProcessTargetOverride { get; init; }
+
     public required int ProcessId { get; init; }
 
     public required string ProcessName { get; init; }
@@ -15,4 +21,6 @@ public sealed class ProcessMatchResult
     public string Display { get; init; } = "(window not found)";
 
     public bool IsFullscreenLike { get; init; }
+
+    public string? EffectiveTargetDisplay { get; init; }
 }

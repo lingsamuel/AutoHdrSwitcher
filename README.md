@@ -46,7 +46,11 @@ Default behavior:
 - `HDR On` in display table is directly editable for manual HDR on/off per display.
 - Display HDR status keeps refreshing live even when monitor is stopped.
 - `Switch all displays together` can be enabled to ignore per-display mapping and toggle HDR on/off for all displays at once.
-- Non-user cache (`cache.json` in app current directory) stores observed display windows for matched/fullscreen apps. Cache uses extensible top-level sections (currently `displayWindowPrediction`) so future cache modules can be added safely. If a matched app has no window yet, app first uses cache prediction; if no prediction exists, app enables all auto-controlled displays until real window is resolved.
+- Each process rule can optionally pin a target display. Available target modes:
+  - `Default`: window display, or primary display when window is not found.
+  - `Switch All Displays`: force HDR desired state to all displays for this match only.
+  - Specific display: force HDR desired state to that display.
+  If a pinned display is currently unavailable, the value is kept and runtime behavior falls back to `Default`.
 - Matched process table also shows `Fullscreen` (fullscreen/borderless-windowed heuristic).
 - Fullscreen table supports `Ignore` checkbox per process. Ignored entries do not affect auto-fullscreen HDR mode.
 - Ignore key uses executable path when available (`path:<fullpath>`), otherwise process name (`name:<processName>`).
@@ -62,6 +66,7 @@ Fields per rule row:
 - `caseSensitive` (default off)
 - `regexMode` (default off; when enabled, `exactMatch` and `caseSensitive` are ignored)
 - `enabled` (default on)
+- `targetDisplay` (optional; omitted means `Default`; supports `Switch All Displays` and concrete display names)
 
 Top-level config fields:
 
@@ -76,6 +81,7 @@ Top-level config fields:
 - `runtimeTopSplitterDistance` / `runtimeBottomSplitterDistance` (`null` = use built-in defaults, about 2 rows visible by default)
 - `fullscreenIgnoreMap` (dictionary of ignore key -> bool, supports `path:...`, `pathprefix:...`, `name:...`)
 - `displayAutoModes` (dictionary of display name -> auto flag; omitted/`true` = auto, `false` = manual)
+- `processTargetDisplayOverrides` (dictionary of process key -> target display, higher priority than rule `targetDisplay`; process key supports `path:...` and `name:...`)
 
 Matching priority is documented in `docs/process-rule-matching.md`.
 

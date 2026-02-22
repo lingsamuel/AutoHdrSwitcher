@@ -8,6 +8,7 @@ namespace AutoHdrSwitcher.UI;
 
 public sealed class MainForm : Form
 {
+    private const string AppIconResourceName = "AutoHdrSwitcher.Assets.AppIcon.ico";
     private const int MinPollSeconds = 1;
     private const int MaxPollSeconds = 30;
     private const int MainTopPanelMinSize = 120;
@@ -18,6 +19,7 @@ public sealed class MainForm : Form
     private const int RuntimeBottomSectionMinSize = 60;
     private const int DisplayRefreshIntervalMs = 1000;
     private const int TraceRecoveryRetrySeconds = 30;
+    private static readonly Icon? AppIconTemplate = LoadAppIconTemplate();
 
     private readonly string _configPath;
     private readonly ProcessMonitorService _monitorService = new();
@@ -29,6 +31,7 @@ public sealed class MainForm : Form
     private readonly BindingList<DisplayHdrRow> _displayRows = new();
     private readonly Dictionary<string, bool> _fullscreenIgnoreMap = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, bool> _displayAutoModes = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _processTargetDisplayOverrides = new(StringComparer.OrdinalIgnoreCase);
     private readonly System.Windows.Forms.Timer _monitorTimer = new();
     private readonly System.Windows.Forms.Timer _eventBurstTimer = new();
     private readonly System.Windows.Forms.Timer _displayRefreshTimer = new();
@@ -40,6 +43,8 @@ public sealed class MainForm : Form
     private DataGridView _matchGrid = null!;
     private DataGridView _fullscreenGrid = null!;
     private DataGridView _displayGrid = null!;
+    private DataGridViewComboBoxColumn _ruleTargetDisplayColumn = null!;
+    private DataGridViewComboBoxColumn _matchTargetDisplayColumn = null!;
     private GroupBox _runtimeGroup = null!;
     private GroupBox _fullscreenGroup = null!;
     private GroupBox _displayGroup = null!;
@@ -63,8 +68,12 @@ public sealed class MainForm : Form
     private bool _suppressDirtyTracking;
     private bool _suppressFullscreenIgnoreEvents;
     private bool _suppressDisplayHdrToggleEvents;
+    private bool _suppressMatchTargetEvents;
     private bool _hasUnsavedChanges;
     private bool _refreshInFlight;
+    private bool _displayTargetOptionsRefreshPending;
+    private string _displayTargetOptionsFingerprint = string.Empty;
+    private string _displayTopologyFingerprint = string.Empty;
     private int _eventBurstRemaining;
     private bool _monitoringActive;
     private bool _eventStreamAvailable;
@@ -92,6 +101,11 @@ public sealed class MainForm : Form
         Height = 760;
         MinimumSize = new Size(980, 640);
         StartPosition = FormStartPosition.CenterScreen;
+        var formIcon = CloneAppIcon();
+        if (formIcon is not null)
+        {
+            Icon = formIcon;
+        }
 
         var topPanel = BuildTopPanel();
         var splitContainer = BuildSplitContainer();
@@ -108,6 +122,26 @@ public sealed class MainForm : Form
         return version is null
             ? "unknown"
             : $"{version.Major}.{version.Minor}.{version.Build}";
+    }
+
+    private static Icon? CloneAppIcon()
+    {
+        return AppIconTemplate is null
+            ? null
+            : (Icon)AppIconTemplate.Clone();
+    }
+
+    private static Icon? LoadAppIconTemplate()
+    {
+        try
+        {
+            using var stream = typeof(MainForm).Assembly.GetManifestResourceStream(AppIconResourceName);
+            return stream is null ? null : new Icon(stream);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private TableLayoutPanel BuildTopPanel()
@@ -382,6 +416,15 @@ public sealed class MainForm : Form
             ToolTipText = string.Empty,
             Width = 75
         });
+        _ruleTargetDisplayColumn = new DataGridViewComboBoxColumn
+        {
+            HeaderText = "Target Display",
+            DataPropertyName = nameof(ProcessWatchRuleRow.TargetDisplay),
+            ToolTipText = string.Empty,
+            DisplayStyle = DataGridViewComboBoxDisplayStyle.DropDownButton,
+            Width = 220
+        };
+        _ruleGrid.Columns.Add(_ruleTargetDisplayColumn);
         ruleGroup.Controls.Add(_ruleGrid);
 
         _runtimeGroup = new GroupBox
@@ -408,7 +451,7 @@ public sealed class MainForm : Form
             Dock = DockStyle.Fill,
             AutoGenerateColumns = false,
             DataSource = _matchRows,
-            ReadOnly = true,
+            ReadOnly = false,
             TabStop = false,
             AllowUserToAddRows = false,
             AllowUserToDeleteRows = false,
@@ -422,6 +465,7 @@ public sealed class MainForm : Form
             HeaderText = "PID",
             DataPropertyName = nameof(ProcessMatchRow.ProcessId),
             ToolTipText = string.Empty,
+            ReadOnly = true,
             Width = 85
         });
         _matchGrid.Columns.Add(new DataGridViewTextBoxColumn
@@ -429,6 +473,7 @@ public sealed class MainForm : Form
             HeaderText = "Process",
             DataPropertyName = nameof(ProcessMatchRow.ProcessName),
             ToolTipText = string.Empty,
+            ReadOnly = true,
             Width = 190
         });
         _matchGrid.Columns.Add(new DataGridViewTextBoxColumn
@@ -436,13 +481,25 @@ public sealed class MainForm : Form
             HeaderText = "Display",
             DataPropertyName = nameof(ProcessMatchRow.Display),
             ToolTipText = string.Empty,
+            ReadOnly = true,
             Width = 145
         });
+        _matchTargetDisplayColumn = new DataGridViewComboBoxColumn
+        {
+            HeaderText = "Target Display",
+            DataPropertyName = nameof(ProcessMatchRow.TargetDisplay),
+            ToolTipText = string.Empty,
+            DisplayStyle = DataGridViewComboBoxDisplayStyle.DropDownButton,
+            ReadOnly = false,
+            Width = 220
+        };
+        _matchGrid.Columns.Add(_matchTargetDisplayColumn);
         _matchGrid.Columns.Add(new DataGridViewCheckBoxColumn
         {
             HeaderText = "Fullscreen",
             DataPropertyName = nameof(ProcessMatchRow.FullscreenLike),
             ToolTipText = string.Empty,
+            ReadOnly = true,
             Width = 85
         });
         _matchGrid.Columns.Add(new DataGridViewTextBoxColumn
@@ -450,6 +507,7 @@ public sealed class MainForm : Form
             HeaderText = "Rule Pattern",
             DataPropertyName = nameof(ProcessMatchRow.RulePattern),
             ToolTipText = string.Empty,
+            ReadOnly = true,
             AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill
         });
         _matchGrid.Columns.Add(new DataGridViewTextBoxColumn
@@ -457,6 +515,7 @@ public sealed class MainForm : Form
             HeaderText = "Mode",
             DataPropertyName = nameof(ProcessMatchRow.Mode),
             ToolTipText = string.Empty,
+            ReadOnly = true,
             Width = 230
         });
         _matchGrid.Columns.Add(new DataGridViewTextBoxColumn
@@ -464,6 +523,7 @@ public sealed class MainForm : Form
             HeaderText = "Matched Input",
             DataPropertyName = nameof(ProcessMatchRow.MatchInput),
             ToolTipText = string.Empty,
+            ReadOnly = true,
             Width = 230
         });
         _runtimeSplit.Panel1.Controls.Add(_matchGrid);
@@ -666,7 +726,7 @@ public sealed class MainForm : Form
 
         _trayIcon = new NotifyIcon
         {
-            Icon = SystemIcons.Application,
+            Icon = CloneAppIcon() ?? SystemIcons.Application,
             Text = "AutoHdrSwitcher",
             Visible = false,
             ContextMenuStrip = _trayMenu
@@ -720,13 +780,33 @@ public sealed class MainForm : Form
             }
         };
         _ruleGrid.CellValueChanged += (_, _) => MarkDirty();
-        _ruleGrid.CellEndEdit += (_, _) => SaveIfDirtyOnFocusLost();
+        _ruleGrid.CellEndEdit += (_, _) =>
+        {
+            SaveIfDirtyOnFocusLost();
+            TryApplyPendingDisplayTargetDropdownRefresh();
+        };
         _ruleGrid.Leave += (_, _) => SaveIfDirtyOnFocusLost();
         _ruleGrid.RowsRemoved += (_, _) => MarkDirty();
         _ruleGrid.DataError += (_, eventArgs) =>
         {
             eventArgs.ThrowException = false;
             SetSaveStatus($"Input error: {eventArgs.Exception?.Message ?? "invalid value"}");
+        };
+        _ruleGrid.CellClick += (_, e) => TryOpenComboBoxOnFirstClick(_ruleGrid, e.RowIndex, e.ColumnIndex);
+        _matchGrid.CurrentCellDirtyStateChanged += (_, _) =>
+        {
+            if (_matchGrid.IsCurrentCellDirty)
+            {
+                _matchGrid.CommitEdit(DataGridViewDataErrorContexts.Commit);
+            }
+        };
+        _matchGrid.CellValueChanged += (_, e) => _ = HandleMatchGridValueChangedAsync(e.RowIndex, e.ColumnIndex);
+        _matchGrid.CellEndEdit += (_, _) => TryApplyPendingDisplayTargetDropdownRefresh();
+        _matchGrid.CellClick += (_, e) => TryOpenComboBoxOnFirstClick(_matchGrid, e.RowIndex, e.ColumnIndex);
+        _matchGrid.DataError += (_, eventArgs) =>
+        {
+            eventArgs.ThrowException = false;
+            SetMonitorStatus($"Matched process input error: {eventArgs.Exception?.Message ?? "invalid value"}");
         };
         _fullscreenGrid.CurrentCellDirtyStateChanged += (_, _) =>
         {
@@ -777,7 +857,15 @@ public sealed class MainForm : Form
             MarkDirty();
         };
 
-        _matchGrid.SelectionChanged += (_, _) => ClearPassiveGridSelection(_matchGrid);
+        _matchGrid.SelectionChanged += (_, _) =>
+        {
+            if (_matchGrid.Focused)
+            {
+                return;
+            }
+
+            ClearPassiveGridSelection(_matchGrid);
+        };
         _displayGrid.SelectionChanged += (_, _) => ClearPassiveGridSelection(_displayGrid);
         _fullscreenGrid.SelectionChanged += (_, _) => ClearPassiveGridSelection(_fullscreenGrid);
 
@@ -796,7 +884,6 @@ public sealed class MainForm : Form
             _displayRefreshTimer.Stop();
             _processEventMonitor.Stop();
             _processEventMonitor.Dispose();
-            _monitorService.FlushPredictionCache();
             _trayIcon.Visible = false;
             _trayIcon.Dispose();
             _trayMenu.Dispose();
@@ -886,7 +973,8 @@ public sealed class MainForm : Form
                     _monitorAllFullscreenCheck.Checked,
                     _fullscreenIgnoreMap,
                     _switchAllDisplaysCheck.Checked,
-                    _displayAutoModes));
+                    _displayAutoModes,
+                    _processTargetDisplayOverrides));
             ApplySnapshot(snapshot, rules.Count);
         }
         catch (Exception ex)
@@ -960,19 +1048,31 @@ public sealed class MainForm : Form
 
     private void ApplySnapshot(ProcessMonitorSnapshot snapshot, int activeRuleCount)
     {
-        _matchRows.Clear();
-        foreach (var match in snapshot.Matches)
+        _suppressMatchTargetEvents = true;
+        try
         {
-            _matchRows.Add(new ProcessMatchRow
+            _matchRows.Clear();
+            foreach (var match in snapshot.Matches)
             {
-                ProcessId = match.ProcessId,
-                ProcessName = match.ProcessName,
-                Display = match.Display,
-                FullscreenLike = match.IsFullscreenLike,
-                RulePattern = match.RulePattern,
-                Mode = match.Mode,
-                MatchInput = match.MatchInput
-            });
+                _matchRows.Add(new ProcessMatchRow
+                {
+                    RuleIndex = match.RuleIndex,
+                    ProcessTargetKey = match.ProcessTargetKey,
+                    HasProcessTargetOverride = match.HasProcessTargetOverride,
+                    ProcessId = match.ProcessId,
+                    ProcessName = match.ProcessName,
+                    Display = match.Display,
+                    FullscreenLike = match.IsFullscreenLike,
+                    RulePattern = match.RulePattern,
+                    Mode = match.Mode,
+                    MatchInput = match.MatchInput,
+                    TargetDisplay = ProcessWatchRuleRow.NormalizeTargetDisplayValue(match.EffectiveTargetDisplay)
+                });
+            }
+        }
+        finally
+        {
+            _suppressMatchTargetEvents = false;
         }
 
         _fullscreenRows.Clear();
@@ -1051,6 +1151,8 @@ public sealed class MainForm : Form
         {
             _suppressDisplayHdrToggleEvents = false;
         }
+
+        RefreshDisplayTargetDropdownOptionsIfDisplayTopologyChanged();
     }
 
     private void LoadConfigurationFromDisk()
@@ -1065,6 +1167,7 @@ public sealed class MainForm : Form
             {
                 _ruleRows.Add(ProcessWatchRuleRow.FromRule(rule));
             }
+            RefreshDisplayTargetDropdownOptions();
 
             var pollSeconds = loaded.PollIntervalSeconds;
             if (pollSeconds < MinPollSeconds || pollSeconds > MaxPollSeconds)
@@ -1100,6 +1203,23 @@ public sealed class MainForm : Form
                 }
 
                 _displayAutoModes[entry.Key] = false;
+            }
+            _processTargetDisplayOverrides.Clear();
+            foreach (var entry in loaded.ProcessTargetDisplayOverrides)
+            {
+                if (string.IsNullOrWhiteSpace(entry.Key) ||
+                    string.IsNullOrWhiteSpace(entry.Value))
+                {
+                    continue;
+                }
+
+                var normalizedTarget = ProcessWatchRuleRow.NormalizeTargetDisplayValue(entry.Value);
+                if (ProcessWatchRuleRow.IsDefaultTargetDisplayValue(normalizedTarget))
+                {
+                    continue;
+                }
+
+                _processTargetDisplayOverrides[entry.Key.Trim()] = normalizedTarget;
             }
             foreach (var defaultIgnoreKey in ProcessMonitorService.DefaultIgnoreKeys)
             {
@@ -1205,6 +1325,7 @@ public sealed class MainForm : Form
                 RuntimeBottomSplitterDistance = GetCurrentSplitterDistance(_runtimeBottomSplit),
                 FullscreenIgnoreMap = new Dictionary<string, bool>(_fullscreenIgnoreMap, StringComparer.OrdinalIgnoreCase),
                 DisplayAutoModes = BuildDisplayAutoModesConfigMap(),
+                ProcessTargetDisplayOverrides = BuildProcessTargetDisplayOverridesConfigMap(),
                 ProcessRules = BuildRulesFromUi(commitEdits: true)
             };
             WatchConfigurationLoader.SaveToFile(_configPath, config);
@@ -1531,6 +1652,55 @@ public sealed class MainForm : Form
         await HandleDisplayHdrToggleChangedAsync(rowIndex);
     }
 
+    private async Task HandleMatchGridValueChangedAsync(int rowIndex, int columnIndex)
+    {
+        if (_suppressMatchTargetEvents || rowIndex < 0 || rowIndex >= _matchRows.Count)
+        {
+            return;
+        }
+
+        if (columnIndex != _matchTargetDisplayColumn.Index)
+        {
+            return;
+        }
+
+        var matchRow = _matchRows[rowIndex];
+        if (string.IsNullOrWhiteSpace(matchRow.ProcessTargetKey))
+        {
+            return;
+        }
+
+        var normalizedTarget = ProcessWatchRuleRow.NormalizeTargetDisplayValue(matchRow.TargetDisplay);
+        var changed = false;
+        if (ProcessWatchRuleRow.IsDefaultTargetDisplayValue(normalizedTarget))
+        {
+            changed = _processTargetDisplayOverrides.Remove(matchRow.ProcessTargetKey);
+        }
+        else if (!_processTargetDisplayOverrides.TryGetValue(matchRow.ProcessTargetKey, out var current) ||
+                 !string.Equals(current, normalizedTarget, StringComparison.OrdinalIgnoreCase))
+        {
+            _processTargetDisplayOverrides[matchRow.ProcessTargetKey] = normalizedTarget;
+            changed = true;
+        }
+
+        if (!changed)
+        {
+            return;
+        }
+
+        MarkDirty();
+        SaveConfigurationToDisk(showSuccessMessage: false);
+        RefreshDisplayTargetDropdownOptions();
+
+        if (_monitoringActive)
+        {
+            await RefreshSnapshotAsync();
+            return;
+        }
+
+        await RefreshDisplaySnapshotAsync();
+    }
+
     private async Task HandleDisplayAutoModeChangedAsync(int rowIndex)
     {
         var row = _displayRows[rowIndex];
@@ -1607,6 +1777,219 @@ public sealed class MainForm : Form
         }
 
         return result;
+    }
+
+    private Dictionary<string, string> BuildProcessTargetDisplayOverridesConfigMap()
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in _processTargetDisplayOverrides)
+        {
+            if (string.IsNullOrWhiteSpace(entry.Key) ||
+                string.IsNullOrWhiteSpace(entry.Value))
+            {
+                continue;
+            }
+
+            var normalized = ProcessWatchRuleRow.NormalizeTargetDisplayValue(entry.Value);
+            if (ProcessWatchRuleRow.IsDefaultTargetDisplayValue(normalized))
+            {
+                continue;
+            }
+
+            result[entry.Key.Trim()] = normalized;
+        }
+
+        return result;
+    }
+
+    private void RefreshDisplayTargetDropdownOptionsIfDisplayTopologyChanged()
+    {
+        var topologyFingerprint = BuildDisplayTopologyFingerprint();
+        if (string.Equals(_displayTopologyFingerprint, topologyFingerprint, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _displayTopologyFingerprint = topologyFingerprint;
+        RefreshDisplayTargetDropdownOptions();
+    }
+
+    private string BuildDisplayTopologyFingerprint()
+    {
+        var displays = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var display in _displayRows.Select(static row => row.Display))
+        {
+            if (!string.IsNullOrWhiteSpace(display))
+            {
+                displays.Add(display);
+            }
+        }
+
+        foreach (var screen in Screen.AllScreens)
+        {
+            if (!string.IsNullOrWhiteSpace(screen.DeviceName))
+            {
+                displays.Add(screen.DeviceName);
+            }
+        }
+
+        return string.Join(
+            "|",
+            displays.OrderBy(static value => value, StringComparer.OrdinalIgnoreCase));
+    }
+
+    private void RefreshDisplayTargetDropdownOptions()
+    {
+        if (_ruleTargetDisplayColumn is null || _matchTargetDisplayColumn is null)
+        {
+            return;
+        }
+
+        var availableDisplays = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var display in _displayRows.Select(static d => d.Display))
+        {
+            if (!string.IsNullOrWhiteSpace(display))
+            {
+                availableDisplays.Add(display);
+            }
+        }
+
+        foreach (var screen in Screen.AllScreens)
+        {
+            if (!string.IsNullOrWhiteSpace(screen.DeviceName))
+            {
+                availableDisplays.Add(screen.DeviceName);
+            }
+        }
+
+        var configuredValues = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var value in _ruleRows.Select(static r => r.TargetDisplay))
+        {
+            var normalized = ProcessWatchRuleRow.NormalizeTargetDisplayValue(value);
+            if (!ProcessWatchRuleRow.IsDefaultTargetDisplayValue(normalized) &&
+                !string.Equals(
+                    normalized,
+                    ProcessWatchRuleRow.SwitchAllDisplaysTargetValue,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                configuredValues.Add(normalized);
+            }
+        }
+
+        foreach (var value in _matchRows.Select(static r => r.TargetDisplay))
+        {
+            var normalized = ProcessWatchRuleRow.NormalizeTargetDisplayValue(value);
+            if (!ProcessWatchRuleRow.IsDefaultTargetDisplayValue(normalized) &&
+                !string.Equals(
+                    normalized,
+                    ProcessWatchRuleRow.SwitchAllDisplaysTargetValue,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                configuredValues.Add(normalized);
+            }
+        }
+
+        var options = new List<DisplayTargetOption>
+        {
+            new(
+                ProcessWatchRuleRow.DefaultTargetDisplayValue,
+                "Default"),
+            new(
+                ProcessWatchRuleRow.SwitchAllDisplaysTargetValue,
+                "Switch All Displays")
+        };
+
+        foreach (var display in availableDisplays.OrderBy(static d => d, StringComparer.OrdinalIgnoreCase))
+        {
+            options.Add(new DisplayTargetOption(display, display));
+        }
+
+        foreach (var display in configuredValues
+                     .Where(value => !availableDisplays.Contains(value))
+                     .OrderBy(static d => d, StringComparer.OrdinalIgnoreCase))
+        {
+            options.Add(new DisplayTargetOption(display, $"{display} (Unavailable; using Default)"));
+        }
+
+        var fingerprint = string.Join(
+            "|",
+            options.Select(static option => $"{option.Value}=>{option.Label}"));
+        if (!_displayTargetOptionsRefreshPending &&
+            string.Equals(_displayTargetOptionsFingerprint, fingerprint, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if ((_ruleGrid is not null && _ruleGrid.IsCurrentCellInEditMode) ||
+            (_matchGrid is not null && _matchGrid.IsCurrentCellInEditMode))
+        {
+            _displayTargetOptionsRefreshPending = true;
+            return;
+        }
+
+        _displayTargetOptionsRefreshPending = false;
+        _displayTargetOptionsFingerprint = fingerprint;
+        ApplyDisplayTargetOptions(_ruleTargetDisplayColumn, options);
+        ApplyDisplayTargetOptions(_matchTargetDisplayColumn, options);
+    }
+
+    private static void ApplyDisplayTargetOptions(
+        DataGridViewComboBoxColumn column,
+        List<DisplayTargetOption> options)
+    {
+        column.DisplayMember = nameof(DisplayTargetOption.Label);
+        column.ValueMember = nameof(DisplayTargetOption.Value);
+        column.DataSource = options.ToList();
+    }
+
+    private void TryApplyPendingDisplayTargetDropdownRefresh()
+    {
+        if (!_displayTargetOptionsRefreshPending)
+        {
+            return;
+        }
+
+        if ((_ruleGrid is not null && _ruleGrid.IsCurrentCellInEditMode) ||
+            (_matchGrid is not null && _matchGrid.IsCurrentCellInEditMode))
+        {
+            return;
+        }
+
+        RefreshDisplayTargetDropdownOptions();
+    }
+
+    private void TryOpenComboBoxOnFirstClick(DataGridView grid, int rowIndex, int columnIndex)
+    {
+        if (rowIndex < 0 || columnIndex < 0)
+        {
+            return;
+        }
+
+        if (grid.Columns[columnIndex] is not DataGridViewComboBoxColumn comboColumn ||
+            comboColumn.ReadOnly)
+        {
+            return;
+        }
+
+        if (grid.CurrentCell is null ||
+            grid.CurrentCell.RowIndex != rowIndex ||
+            grid.CurrentCell.ColumnIndex != columnIndex)
+        {
+            grid.CurrentCell = grid.Rows[rowIndex].Cells[columnIndex];
+        }
+
+        if (!grid.IsCurrentCellInEditMode)
+        {
+            _ = grid.BeginEdit(selectAll: true);
+        }
+
+        BeginInvoke(new Action(() =>
+        {
+            if (grid.EditingControl is DataGridViewComboBoxEditingControl comboEditingControl)
+            {
+                comboEditingControl.DroppedDown = true;
+            }
+        }));
     }
 
     private bool ResolveIgnoreFromMap(FullscreenProcessInfo info)
@@ -1691,6 +2074,8 @@ public sealed class MainForm : Form
         {
             _suppressDisplayHdrToggleEvents = false;
         }
+
+        RefreshDisplayTargetDropdownOptionsIfDisplayTopologyChanged();
     }
 
     private static void ConfigureGridStyle(DataGridView grid)
@@ -1839,4 +2224,6 @@ public sealed class MainForm : Form
             : name + ".exe";
         return ProcessWatchMatcher.IsMatchAny(exeName, rules);
     }
+
+    private sealed record DisplayTargetOption(string Value, string Label);
 }

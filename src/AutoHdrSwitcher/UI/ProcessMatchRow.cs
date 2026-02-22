@@ -2,17 +2,31 @@ namespace AutoHdrSwitcher.UI;
 
 public sealed class ProcessMatchRow
 {
-    public int ProcessId { get; init; }
+    public int RuleIndex { get; set; } = -1;
 
-    public string ProcessName { get; init; } = string.Empty;
+    public string ProcessTargetKey { get; set; } = string.Empty;
 
-    public string RulePattern { get; init; } = string.Empty;
+    public bool HasProcessTargetOverride { get; set; }
 
-    public string Mode { get; init; } = string.Empty;
+    public int ProcessId { get; set; }
 
-    public string MatchInput { get; init; } = string.Empty;
+    public string ProcessName { get; set; } = string.Empty;
 
-    public string Display { get; init; } = string.Empty;
+    public string RulePattern { get; set; } = string.Empty;
 
-    public bool FullscreenLike { get; init; }
+    public string Mode { get; set; } = string.Empty;
+
+    public string MatchInput { get; set; } = string.Empty;
+
+    public string Display { get; set; } = string.Empty;
+
+    public bool FullscreenLike { get; set; }
+
+    private string _targetDisplay = ProcessWatchRuleRow.DefaultTargetDisplayValue;
+
+    public string TargetDisplay
+    {
+        get => _targetDisplay;
+        set => _targetDisplay = ProcessWatchRuleRow.NormalizeTargetDisplayValue(value);
+    }
 }

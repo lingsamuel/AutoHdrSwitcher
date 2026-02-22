@@ -15,6 +15,7 @@
     "name:dwm": true
   },
   "displayAutoModes": {},
+  "processTargetDisplayOverrides": {},
   "processRules": [
     {
       "pattern": "eldenring",
