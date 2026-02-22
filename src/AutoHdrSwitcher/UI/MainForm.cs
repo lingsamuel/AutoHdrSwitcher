@@ -22,16 +22,8 @@ public sealed class MainForm : Form
     private const int TraceRecoveryRetrySeconds = 30;
     private const int DefaultEventBurstRefreshCount = 6;
     private const int TraceStartProactiveRefreshCount = 4;
+    private const int FullscreenAllEventRefreshThrottleMs = 1000;
     private const int PendingStartEventRetentionSeconds = 180;
-    private static readonly string[] EventBurstIgnoredProcessPrefixes =
-    {
-        "conhost",
-        "nvngx_update",
-        "runtimebroker",
-        "backgroundtask",
-        "gamebarpresenc",
-        "fping"
-    };
     private static readonly Icon? AppIconTemplate = LoadAppIconTemplate();
 
     private readonly string _configPath;
@@ -98,6 +90,7 @@ public sealed class MainForm : Form
     private int? _loadedRuntimeTopSplitterDistance;
     private int? _loadedRuntimeBottomSplitterDistance;
     private DateTimeOffset _nextTraceRecoveryAttemptAt = DateTimeOffset.MinValue;
+    private DateTimeOffset _nextFullscreenAllEventRefreshAt = DateTimeOffset.MinValue;
 
     public MainForm(string configPath)
     {
@@ -952,6 +945,8 @@ public sealed class MainForm : Form
     private void StartMonitoring()
     {
         AppLogger.Info("Start monitoring requested.");
+        _nextFullscreenAllEventRefreshAt = DateTimeOffset.MinValue;
+        _eventBurstRemaining = 0;
         _eventStreamAvailable = EnsureProcessEventsStarted();
         _monitoringActive = true;
         ApplyPollingMode();
@@ -969,8 +964,10 @@ public sealed class MainForm : Form
         _monitoringActive = false;
         _monitorTimer.Stop();
         _eventBurstTimer.Stop();
+        _eventBurstRemaining = 0;
         _snapshotRefreshPending = false;
         _pendingStartEvents.Clear();
+        _nextFullscreenAllEventRefreshAt = DateTimeOffset.MinValue;
         _processEventMonitor.Stop();
         _startButton.Enabled = true;
         _stopButton.Enabled = false;
@@ -2253,27 +2250,44 @@ public sealed class MainForm : Form
             return;
         }
 
-        TrackStartStopEventForLatency(e);
-        CleanupStalePendingStartEvents();
-
         var rules = BuildRulesFromUi(commitEdits: false);
-        if (ShouldIgnoreEventForBurst(e, rules))
+        CleanupStalePendingStartEvents();
+        if (ShouldIgnoreProcessEventByDefault(e, rules))
         {
             AppLogger.Info(
-                $"Ignoring noisy process event for burst refresh. seq={e.SequenceId}; type={e.EventType}; pid={e.ProcessId}; name={e.ProcessName}");
+                $"Ignoring default-ignored process event. seq={e.SequenceId}; type={e.EventType}; pid={e.ProcessId}; name={e.ProcessName}");
             return;
         }
 
-        var shouldReact = ShouldReactToProcessEvent(e, rules);
+        TrackStartStopEventForLatency(e);
+
+        var ruleNameMatch = IsRuleNameMatchForProcessEvent(e, rules);
         var isTraceStartEvent =
             _processEventMonitor.CurrentMode == ProcessEventStreamMode.Trace &&
             string.Equals(e.EventType, "start", StringComparison.OrdinalIgnoreCase);
-        var proactiveTraceStartRefresh = !shouldReact && isTraceStartEvent && rules.Count > 0;
+        var proactiveTraceStartRefresh = !ruleNameMatch && isTraceStartEvent && rules.Count > 0;
+        var monitorAllFullscreen = _monitorAllFullscreenCheck.Checked;
+        var fullscreenFallbackRefresh = monitorAllFullscreen && !ruleNameMatch && !proactiveTraceStartRefresh;
+        var shouldReact = ruleNameMatch || proactiveTraceStartRefresh || fullscreenFallbackRefresh;
         AppLogger.Info(
-            $"UI process event decision. seq={e.SequenceId}; type={e.EventType}; mode={e.StreamMode}; pid={e.ProcessId}; name={e.ProcessName}; eventClass={e.EventClassName}; deliveryMs={DescribeLatency(e.DeliveryLatencyMs)}; eventToUiMs={eventToUiMs:F3}; shouldReact={shouldReact}; proactiveTraceStartRefresh={proactiveTraceStartRefresh}; rules={rules.Count}; refreshInFlight={_refreshInFlight}; pending={_snapshotRefreshPending}; burstRemaining={_eventBurstRemaining}");
-        if (!shouldReact && !proactiveTraceStartRefresh)
+            $"UI process event decision. seq={e.SequenceId}; type={e.EventType}; mode={e.StreamMode}; pid={e.ProcessId}; name={e.ProcessName}; eventClass={e.EventClassName}; deliveryMs={DescribeLatency(e.DeliveryLatencyMs)}; eventToUiMs={eventToUiMs:F3}; ruleNameMatch={ruleNameMatch}; monitorAllFullscreen={monitorAllFullscreen}; fullscreenFallbackRefresh={fullscreenFallbackRefresh}; shouldReact={shouldReact}; proactiveTraceStartRefresh={proactiveTraceStartRefresh}; rules={rules.Count}; refreshInFlight={_refreshInFlight}; pending={_snapshotRefreshPending}; burstRemaining={_eventBurstRemaining}");
+        if (!shouldReact)
         {
             return;
+        }
+
+        if (fullscreenFallbackRefresh)
+        {
+            var nowUtc = DateTimeOffset.UtcNow;
+            if (nowUtc < _nextFullscreenAllEventRefreshAt)
+            {
+                var remainingMs = (_nextFullscreenAllEventRefreshAt - nowUtc).TotalMilliseconds;
+                AppLogger.Info(
+                    $"Skipping fullscreen fallback event refresh due to throttle. seq={e.SequenceId}; type={e.EventType}; pid={e.ProcessId}; name={e.ProcessName}; remainingMs={remainingMs:F0}");
+                return;
+            }
+
+            _nextFullscreenAllEventRefreshAt = nowUtc.AddMilliseconds(FullscreenAllEventRefreshThrottleMs);
         }
 
         if (_refreshInFlight && _snapshotRefreshPending)
@@ -2291,8 +2305,16 @@ public sealed class MainForm : Form
             return;
         }
 
+        if (fullscreenFallbackRefresh)
+        {
+            AppLogger.Info(
+                $"Scheduling single fullscreen fallback refresh without burst. seq={e.SequenceId}; throttleMs={FullscreenAllEventRefreshThrottleMs}");
+            _ = RefreshSnapshotAsync($"process-event:{e.EventType}", e);
+            return;
+        }
+
         var previousBurst = _eventBurstRemaining;
-        var burstRefreshCount = shouldReact
+        var burstRefreshCount = ruleNameMatch
             ? DefaultEventBurstRefreshCount
             : TraceStartProactiveRefreshCount;
         _eventBurstRemaining = Math.Max(_eventBurstRemaining, burstRefreshCount);
@@ -2303,15 +2325,10 @@ public sealed class MainForm : Form
         _ = RefreshSnapshotAsync($"process-event:{e.EventType}", e);
     }
 
-    private bool ShouldReactToProcessEvent(
+    private static bool IsRuleNameMatchForProcessEvent(
         ProcessEventNotification e,
         IReadOnlyCollection<ProcessWatchRule> rules)
     {
-        if (_monitorAllFullscreenCheck.Checked)
-        {
-            return true;
-        }
-
         if (rules.Count == 0)
         {
             return false;
@@ -2334,7 +2351,7 @@ public sealed class MainForm : Form
         return ProcessWatchMatcher.IsMatchAny(exeName, rules);
     }
 
-    private static bool ShouldIgnoreEventForBurst(
+    private static bool ShouldIgnoreProcessEventByDefault(
         ProcessEventNotification e,
         IReadOnlyCollection<ProcessWatchRule> rules)
     {
@@ -2344,7 +2361,7 @@ public sealed class MainForm : Form
             return false;
         }
 
-        if (!IsEventBurstIgnoredProcess(normalized))
+        if (!ProcessMonitorService.IsDefaultIgnoredProcessName(normalized))
         {
             return false;
         }
@@ -2358,19 +2375,6 @@ public sealed class MainForm : Form
         }
 
         return true;
-    }
-
-    private static bool IsEventBurstIgnoredProcess(string normalizedProcessName)
-    {
-        foreach (var prefix in EventBurstIgnoredProcessPrefixes)
-        {
-            if (normalizedProcessName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private static string NormalizeProcessNameForEventFilter(string processName)

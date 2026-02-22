@@ -13,12 +13,64 @@ public sealed class ProcessMonitorService
     private const string DefaultWindowsPathPrefix = @"C:\Windows\";
     private static readonly string NormalizedDefaultWindowsPathPrefix = NormalizePath(DefaultWindowsPathPrefix);
 
-    private static readonly HashSet<string> DefaultIgnoredProcessNames =
-        new(StringComparer.OrdinalIgnoreCase)
-        {
-            "TextInputHost",
-            "dwm"
-        };
+    private static readonly string[] DefaultIgnoredProcessNameSeeds =
+    {
+        // System and shell infrastructure
+        "TextInputHost",
+        "dwm",
+        "ctfmon",
+        "WmiPrvSE",
+        "svchost",
+        "RuntimeBroker",
+        "backgroundTaskHost",
+        "taskhostw",
+        "DllHost",
+        "conhost",
+        "explorer",
+        "sihost",
+        "ShellExperienceHost",
+        "StartMenuExperienceHost",
+        "SearchHost",
+        "SearchIndexer",
+        "ApplicationFrameHost",
+        "audiodg",
+        "fontdrvhost",
+        "smartscreen",
+        "SecurityHealthSystray",
+        "SecurityHealthService",
+        "WUDFHost",
+        "AggregatorHost",
+        "LockApp",
+        "MoUsoCoreWorker",
+        "spoolsv",
+
+        // Command helpers / telemetry noise
+        "ping",
+        "fping",
+        "wsl",
+        "wslhost",
+        "nvngx_update",
+        "backgroundtask",
+        "gamebarpresenc",
+
+        // Browsers and browser helpers
+        "msedge",
+        "msedgewebview2",
+        "chrome",
+        "chrome_proxy",
+        "chrome_crashpad_handler",
+        "firefox",
+        "plugin-container",
+        "brave",
+        "brave_crashpad_handler",
+        "opera",
+        "opera_crashreporter",
+        "vivaldi",
+        "vivaldi_crashpad_handler",
+        "steamwebhelper"
+    };
+
+    private static readonly HashSet<string> DefaultIgnoredProcessNames = BuildDefaultIgnoredProcessNames();
 
     private readonly ProcessDisplayResolver _displayResolver = new();
     private readonly HdrController _hdrController = new();
@@ -27,6 +79,12 @@ public sealed class ProcessMonitorService
         BuildPathPrefixIgnoreKey(DefaultWindowsPathPrefix);
 
     public static IReadOnlyList<string> DefaultIgnoreKeys { get; } = BuildDefaultIgnoreKeys();
+
+    public static bool IsDefaultIgnoredProcessName(string processName)
+    {
+        var normalizedName = NormalizeProcessNameForIgnore(processName);
+        return !string.IsNullOrWhiteSpace(normalizedName) && DefaultIgnoredProcessNames.Contains(normalizedName);
+    }
 
     public ProcessMonitorSnapshot Evaluate(
         IReadOnlyList<ProcessWatchRule> rules,
@@ -801,7 +859,7 @@ public sealed class ProcessMonitorService
             return;
         }
 
-        var defaultIgnored = DefaultIgnoredProcessNames.Contains(normalizedName);
+        var defaultIgnored = IsDefaultIgnoredProcessName(normalizedName);
         ignoreKey = !string.IsNullOrEmpty(pathKey) ? pathKey : nameKey;
         isIgnored = defaultIgnored;
         isDefaultIgnoreApplied = defaultIgnored;
@@ -892,6 +950,23 @@ public sealed class ProcessMonitorService
         return keys;
     }
 
+    private static HashSet<string> BuildDefaultIgnoredProcessNames()
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var seed in DefaultIgnoredProcessNameSeeds)
+        {
+            var normalized = NormalizeProcessNameForIgnore(seed);
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                continue;
+            }
+
+            names.Add(normalized);
+        }
+
+        return names;
+    }
+
     private static bool TryResolvePathPrefixIgnore(
         string? executablePath,
         IReadOnlyDictionary<string, bool> ignoreMap,
@@ -946,6 +1021,27 @@ public sealed class ProcessMonitorService
         }
 
         return NormalizePath(executablePath).StartsWith(NormalizedDefaultWindowsPathPrefix, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizeProcessNameForIgnore(string processName)
+    {
+        if (string.IsNullOrWhiteSpace(processName))
+        {
+            return string.Empty;
+        }
+
+        var normalized = processName.Trim();
+        if (normalized.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = normalized[..^4];
+        }
+
+        while (normalized.EndsWith(".", StringComparison.Ordinal))
+        {
+            normalized = normalized[..^1];
+        }
+
+        return normalized;
     }
 
     private static string NormalizePath(string path)
