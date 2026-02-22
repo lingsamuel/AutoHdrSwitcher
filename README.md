@@ -68,6 +68,7 @@ Top-level config fields:
 - `pollIntervalSeconds` (default 2)
 - `pollingEnabled` (default `false`)
 - `minimizeToTray` (default `true`)
+- `autoRequestAdminForTrace` (default `false`; when true and not elevated, app prompts UAC and relaunches as admin to improve trace event availability)
 - `monitorAllFullscreenProcesses` (default `false`)
 - `switchAllDisplaysTogether` (default `false`)
 - `mainSplitterDistance` (rules/runtime split)

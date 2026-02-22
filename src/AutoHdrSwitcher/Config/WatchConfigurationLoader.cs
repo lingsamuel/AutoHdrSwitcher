@@ -63,4 +63,35 @@ public static class WatchConfigurationLoader
         var json = JsonSerializer.Serialize(config, JsonOptions);
         File.WriteAllText(path, json);
     }
+
+    public static bool TryReadAutoRequestAdminForTrace(string path, out bool enabled)
+    {
+        enabled = false;
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var stream = File.OpenRead(path);
+            using var document = JsonDocument.Parse(stream);
+            if (!document.RootElement.TryGetProperty("autoRequestAdminForTrace", out var property))
+            {
+                return false;
+            }
+
+            if (property.ValueKind != JsonValueKind.True && property.ValueKind != JsonValueKind.False)
+            {
+                return false;
+            }
+
+            enabled = property.GetBoolean();
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 }

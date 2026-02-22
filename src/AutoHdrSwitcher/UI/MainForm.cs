@@ -49,6 +49,7 @@ public sealed class MainForm : Form
     private CheckBox _minimizeToTrayCheck = null!;
     private CheckBox _monitorAllFullscreenCheck = null!;
     private CheckBox _switchAllDisplaysCheck = null!;
+    private CheckBox _autoRequestAdminCheck = null!;
     private ToolStripStatusLabel _monitorStateLabel = null!;
     private ToolStripStatusLabel _snapshotLabel = null!;
     private ToolStripStatusLabel _saveStateLabel = null!;
@@ -206,7 +207,7 @@ public sealed class MainForm : Form
 
         _minimizeToTrayCheck = new CheckBox
         {
-            Text = "Close to tray (exit from tray menu)",
+            Text = "Close to tray",
             AutoSize = true,
             Margin = new Padding(0, 4, 12, 0)
         };
@@ -236,6 +237,17 @@ public sealed class MainForm : Form
             _ = RefreshSnapshotAsync();
         };
 
+        _autoRequestAdminCheck = new CheckBox
+        {
+            Text = "Auto request admin for trace (next launch)",
+            AutoSize = true,
+            Margin = new Padding(12, 4, 0, 0)
+        };
+        _autoRequestAdminCheck.CheckedChanged += (_, _) =>
+        {
+            MarkDirty();
+        };
+
         var monitorOptionsRow = new FlowLayoutPanel
         {
             AutoSize = true,
@@ -249,6 +261,7 @@ public sealed class MainForm : Form
         monitorOptionsRow.Controls.Add(_minimizeToTrayCheck);
         monitorOptionsRow.Controls.Add(_monitorAllFullscreenCheck);
         monitorOptionsRow.Controls.Add(_switchAllDisplaysCheck);
+        monitorOptionsRow.Controls.Add(_autoRequestAdminCheck);
 
         var configRow = new TableLayoutPanel
         {
@@ -1050,6 +1063,7 @@ public sealed class MainForm : Form
             _minimizeToTrayCheck.Checked = loaded.MinimizeToTray;
             _monitorAllFullscreenCheck.Checked = loaded.MonitorAllFullscreenProcesses;
             _switchAllDisplaysCheck.Checked = loaded.SwitchAllDisplaysTogether;
+            _autoRequestAdminCheck.Checked = loaded.AutoRequestAdminForTrace;
             _monitorTimer.Interval = pollSeconds * 1000;
             ApplyPollingMode();
             _fullscreenIgnoreMap.Clear();
@@ -1167,6 +1181,7 @@ public sealed class MainForm : Form
                 PollIntervalSeconds = (int)_pollSecondsInput.Value,
                 PollingEnabled = _pollingEnabledCheck.Checked,
                 MinimizeToTray = _minimizeToTrayCheck.Checked,
+                AutoRequestAdminForTrace = _autoRequestAdminCheck.Checked,
                 MonitorAllFullscreenProcesses = _monitorAllFullscreenCheck.Checked,
                 SwitchAllDisplaysTogether = _switchAllDisplaysCheck.Checked,
                 MainSplitterDistance = GetCurrentSplitterDistance(_mainSplit),

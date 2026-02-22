@@ -11,6 +11,8 @@ public sealed class WatchConfiguration
 
     public bool MinimizeToTray { get; init; } = true;
 
+    public bool AutoRequestAdminForTrace { get; init; }
+
     public bool MonitorAllFullscreenProcesses { get; init; }
 
     public bool SwitchAllDisplaysTogether { get; init; }

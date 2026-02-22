@@ -65,6 +65,9 @@ dotnet.exe run --project src/AutoHdrSwitcher -- --config C:\path\to\config.json
 顶层配置字段：
 
 - `pollIntervalSeconds`（默认 2）
+- `pollingEnabled`（默认 `false`）
+- `minimizeToTray`（默认 `true`）
+- `autoRequestAdminForTrace`（默认 `false`；开启后若当前非管理员，会自动弹 UAC 并以管理员权限重启，提升 trace 事件可用性）
 - `monitorAllFullscreenProcesses`（默认 `false`）
 - `switchAllDisplaysTogether`（默认 `false`）
 - `runtimeTopSplitterDistance` / `runtimeBottomSplitterDistance`（`null` 表示使用内置默认值，默认大约显示 2 行）
