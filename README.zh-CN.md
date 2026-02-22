@@ -39,7 +39,7 @@ dotnet.exe run --project src/AutoHdrSwitcher -- --config C:\path\to\config.json
 - 如果配置文件不存在，应用会自动创建（默认是程序目录下的 `config.json`）。
 - 如果没有配置任何规则，应用不会退出，而是继续运行并显示状态。
 - 最小化会将应用收纳到系统托盘（从任务栏移除）。双击托盘图标可恢复窗口。
-- 运行日志会写入程序目录下的 `logs/autohdrswitcher.log`。
+- 运行日志会写入程序目录下的 `logs/autohdrswitcher.log`，并在每次启动时清空旧日志。
 - 运行时视图会显示命中进程、所有全屏进程，以及每个显示器的 HDR 状态（`Supported`、`HDR On`、`Desired`、`Action`）。
 - 显示器表新增 `Auto` 列：`Auto=false` 时该显示器不再由自动逻辑控制，完全按用户手动设置。
 - 显示器表格中的 `HDR On` 支持直接勾选/取消，手动切换对应显示器 HDR。
@@ -67,6 +67,7 @@ dotnet.exe run --project src/AutoHdrSwitcher -- --config C:\path\to\config.json
 - `pollIntervalSeconds`（默认 2）
 - `pollingEnabled`（默认 `false`）
 - `minimizeToTray`（默认 `true`）
+- `enableLogging`（默认 `true`；关闭后禁用文件日志）
 - `autoRequestAdminForTrace`（默认 `false`；开启后若当前非管理员，会自动弹 UAC 并以管理员权限重启，提升 trace 事件可用性）
 - `monitorAllFullscreenProcesses`（默认 `false`）
 - `switchAllDisplaysTogether`（默认 `false`）

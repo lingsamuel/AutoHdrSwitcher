@@ -148,13 +148,14 @@ Persisted in `config.json`:
 1. `pollIntervalSeconds`
 2. `pollingEnabled`
 3. `minimizeToTray`
-4. `autoRequestAdminForTrace`
-5. `monitorAllFullscreenProcesses`
-6. `mainSplitterDistance`
-7. `runtimeTopSplitterDistance`
-8. `runtimeBottomSplitterDistance`
-9. `fullscreenIgnoreMap`
-10. `processRules`
+4. `enableLogging`
+5. `autoRequestAdminForTrace`
+6. `monitorAllFullscreenProcesses`
+7. `mainSplitterDistance`
+8. `runtimeTopSplitterDistance`
+9. `runtimeBottomSplitterDistance`
+10. `fullscreenIgnoreMap`
+11. `processRules`
 
 Window placement persistence:
 

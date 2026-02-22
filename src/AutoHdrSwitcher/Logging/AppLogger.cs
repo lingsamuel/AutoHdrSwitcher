@@ -7,8 +7,46 @@ public static class AppLogger
     private static readonly object Sync = new();
     private static readonly string LogDirectoryPath = Path.Combine(AppContext.BaseDirectory, "logs");
     private static readonly string LogFilePath = Path.Combine(LogDirectoryPath, "autohdrswitcher.log");
+    private static bool _enabled = true;
+    private static bool _initialized;
 
     public static string CurrentLogPath => LogFilePath;
+
+    public static void Initialize(bool enabled, bool clearOnStartup)
+    {
+        lock (Sync)
+        {
+            _enabled = enabled;
+            _initialized = true;
+            if (!clearOnStartup)
+            {
+                return;
+            }
+
+            try
+            {
+                Directory.CreateDirectory(LogDirectoryPath);
+                using var _ = new FileStream(
+                    LogFilePath,
+                    FileMode.Create,
+                    FileAccess.Write,
+                    FileShare.ReadWrite);
+            }
+            catch
+            {
+                // Logging initialization must never crash the application.
+            }
+        }
+    }
+
+    public static void SetEnabled(bool enabled)
+    {
+        lock (Sync)
+        {
+            _enabled = enabled;
+            _initialized = true;
+        }
+    }
 
     public static void Info(string message)
     {
@@ -29,6 +67,12 @@ public static class AppLogger
     {
         try
         {
+            EnsureInitialized();
+            if (!_enabled)
+            {
+                return;
+            }
+
             Directory.CreateDirectory(LogDirectoryPath);
 
             var builder = new StringBuilder(256);
@@ -47,7 +91,14 @@ public static class AppLogger
 
             lock (Sync)
             {
-                File.AppendAllText(LogFilePath, builder.ToString(), Encoding.UTF8);
+                using var stream = new FileStream(
+                    LogFilePath,
+                    FileMode.OpenOrCreate,
+                    FileAccess.Write,
+                    FileShare.ReadWrite);
+                stream.Seek(0, SeekOrigin.End);
+                using var writer = new StreamWriter(stream, Encoding.UTF8);
+                writer.Write(builder.ToString());
             }
         }
         catch
@@ -79,5 +130,24 @@ public static class AppLogger
         }
 
         return builder.ToString();
+    }
+
+    private static void EnsureInitialized()
+    {
+        if (_initialized)
+        {
+            return;
+        }
+
+        lock (Sync)
+        {
+            if (_initialized)
+            {
+                return;
+            }
+
+            _enabled = true;
+            _initialized = true;
+        }
     }
 }

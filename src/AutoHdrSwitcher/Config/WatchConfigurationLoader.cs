@@ -6,6 +6,10 @@ namespace AutoHdrSwitcher.Config;
 
 public static class WatchConfigurationLoader
 {
+    public readonly record struct StartupOptions(
+        bool AutoRequestAdminForTrace,
+        bool EnableLogging);
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -64,34 +68,37 @@ public static class WatchConfigurationLoader
         File.WriteAllText(path, json);
     }
 
-    public static bool TryReadAutoRequestAdminForTrace(string path, out bool enabled)
+    public static StartupOptions ReadStartupOptions(string path)
     {
-        enabled = false;
+        var options = new StartupOptions(
+            AutoRequestAdminForTrace: false,
+            EnableLogging: true);
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
         {
-            return false;
+            return options;
         }
 
         try
         {
             using var stream = File.OpenRead(path);
             using var document = JsonDocument.Parse(stream);
-            if (!document.RootElement.TryGetProperty("autoRequestAdminForTrace", out var property))
+            if (document.RootElement.TryGetProperty("autoRequestAdminForTrace", out var autoAdminProperty) &&
+                (autoAdminProperty.ValueKind == JsonValueKind.True || autoAdminProperty.ValueKind == JsonValueKind.False))
             {
-                return false;
+                options = options with { AutoRequestAdminForTrace = autoAdminProperty.GetBoolean() };
             }
 
-            if (property.ValueKind != JsonValueKind.True && property.ValueKind != JsonValueKind.False)
+            if (document.RootElement.TryGetProperty("enableLogging", out var loggingProperty) &&
+                (loggingProperty.ValueKind == JsonValueKind.True || loggingProperty.ValueKind == JsonValueKind.False))
             {
-                return false;
+                options = options with { EnableLogging = loggingProperty.GetBoolean() };
             }
 
-            enabled = property.GetBoolean();
-            return true;
+            return options;
         }
         catch
         {
-            return false;
+            return options;
         }
     }
 }

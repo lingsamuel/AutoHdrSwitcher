@@ -17,10 +17,16 @@ internal static class Program
     {
         try
         {
-            AppLogger.Info($"Startup begin. Args: {string.Join(' ', args)}");
             ApplicationConfiguration.Initialize();
             var configPath = ResolveConfigPath(args);
-            if (ShouldAutoRequestAdmin(args, configPath) && TryRestartAsAdministrator(args))
+            var startupOptions = WatchConfigurationLoader.ReadStartupOptions(configPath);
+            AppLogger.Initialize(
+                enabled: startupOptions.EnableLogging,
+                clearOnStartup: true);
+
+            AppLogger.Info($"Startup begin. Args: {string.Join(' ', args)}");
+            if (ShouldAutoRequestAdmin(args, startupOptions.AutoRequestAdminForTrace) &&
+                TryRestartAsAdministrator(args))
             {
                 AppLogger.Info("Restarting as administrator due to autoRequestAdminForTrace.");
                 return;
@@ -63,7 +69,7 @@ internal static class Program
         return defaultPath;
     }
 
-    private static bool ShouldAutoRequestAdmin(string[] args, string configPath)
+    private static bool ShouldAutoRequestAdmin(string[] args, bool autoRequestAdminForTrace)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -76,11 +82,6 @@ internal static class Program
         }
 
         if (IsRunningAsAdministrator())
-        {
-            return false;
-        }
-
-        if (!WatchConfigurationLoader.TryReadAutoRequestAdminForTrace(configPath, out var autoRequestAdminForTrace))
         {
             return false;
         }

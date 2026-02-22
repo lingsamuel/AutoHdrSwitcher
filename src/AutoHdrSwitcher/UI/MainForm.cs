@@ -47,6 +47,7 @@ public sealed class MainForm : Form
     private NumericUpDown _pollSecondsInput = null!;
     private CheckBox _pollingEnabledCheck = null!;
     private CheckBox _minimizeToTrayCheck = null!;
+    private CheckBox _enableLoggingCheck = null!;
     private CheckBox _monitorAllFullscreenCheck = null!;
     private CheckBox _switchAllDisplaysCheck = null!;
     private CheckBox _autoRequestAdminCheck = null!;
@@ -213,6 +214,18 @@ public sealed class MainForm : Form
         };
         _minimizeToTrayCheck.CheckedChanged += (_, _) => MarkDirty();
 
+        _enableLoggingCheck = new CheckBox
+        {
+            Text = "Enable logging",
+            AutoSize = true,
+            Margin = new Padding(0, 4, 12, 0)
+        };
+        _enableLoggingCheck.CheckedChanged += (_, _) =>
+        {
+            AppLogger.SetEnabled(_enableLoggingCheck.Checked);
+            MarkDirty();
+        };
+
         _monitorAllFullscreenCheck = new CheckBox
         {
             Text = "Auto monitor all fullscreen processes",
@@ -259,6 +272,7 @@ public sealed class MainForm : Form
             Padding = Padding.Empty
         };
         monitorOptionsRow.Controls.Add(_minimizeToTrayCheck);
+        monitorOptionsRow.Controls.Add(_enableLoggingCheck);
         monitorOptionsRow.Controls.Add(_monitorAllFullscreenCheck);
         monitorOptionsRow.Controls.Add(_switchAllDisplaysCheck);
         monitorOptionsRow.Controls.Add(_autoRequestAdminCheck);
@@ -1061,6 +1075,7 @@ public sealed class MainForm : Form
             _pollSecondsInput.Value = pollSeconds;
             _pollingEnabledCheck.Checked = loaded.PollingEnabled;
             _minimizeToTrayCheck.Checked = loaded.MinimizeToTray;
+            _enableLoggingCheck.Checked = loaded.EnableLogging;
             _monitorAllFullscreenCheck.Checked = loaded.MonitorAllFullscreenProcesses;
             _switchAllDisplaysCheck.Checked = loaded.SwitchAllDisplaysTogether;
             _autoRequestAdminCheck.Checked = loaded.AutoRequestAdminForTrace;
@@ -1181,6 +1196,7 @@ public sealed class MainForm : Form
                 PollIntervalSeconds = (int)_pollSecondsInput.Value,
                 PollingEnabled = _pollingEnabledCheck.Checked,
                 MinimizeToTray = _minimizeToTrayCheck.Checked,
+                EnableLogging = _enableLoggingCheck.Checked,
                 AutoRequestAdminForTrace = _autoRequestAdminCheck.Checked,
                 MonitorAllFullscreenProcesses = _monitorAllFullscreenCheck.Checked,
                 SwitchAllDisplaysTogether = _switchAllDisplaysCheck.Checked,
