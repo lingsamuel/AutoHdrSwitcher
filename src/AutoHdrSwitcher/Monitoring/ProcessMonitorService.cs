@@ -74,6 +74,8 @@ public sealed class ProcessMonitorService
 
     private readonly ProcessDisplayResolver _displayResolver = new();
     private readonly HdrController _hdrController = new();
+    // Track only processes that can affect HDR decisions (matched or monitor-all-fullscreen),
+    // so window-loss can be treated as "exiting" instead of falling back to primary.
     private readonly HashSet<int> _processesWithObservedWindow = new();
 
     public static string DefaultWindowsPathPrefixIgnoreKey { get; } =
@@ -156,6 +158,7 @@ public sealed class ProcessMonitorService
 
                         if (resolvedWindows.ContainsKey(processId))
                         {
+                            // Once matched process window has been seen, a later missing window means teardown.
                             _processesWithObservedWindow.Add(processId);
                         }
 
@@ -214,6 +217,7 @@ public sealed class ProcessMonitorService
         {
             if (monitorAllFullscreenProcesses)
             {
+                // Fullscreen auto-monitoring participates in HDR targeting, so keep the same window-loss semantics.
                 _processesWithObservedWindow.Add(window.ProcessId);
             }
 
@@ -497,6 +501,8 @@ public sealed class ProcessMonitorService
             : configuredTargetDisplay.Trim();
         if (!resolvedWindows.ContainsKey(processId) && hasObservedWindow)
         {
+            // Handle long shutdowns: process remains alive but window disappears.
+            // Suspend mapping to avoid accidental "Default -> primary display" HDR toggles.
             var exitingLabel = string.IsNullOrWhiteSpace(configured)
                 ? "(window disappeared -> exiting)"
                 : $"(window disappeared -> exiting; target suspended: {configured})";

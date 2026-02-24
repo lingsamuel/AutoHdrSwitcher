@@ -6,8 +6,57 @@ internal sealed class WindowPlacementSettings : ApplicationSettingsBase
 {
     private static readonly WindowPlacementSettings DefaultInstance =
         (WindowPlacementSettings)Synchronized(new WindowPlacementSettings());
+    private static readonly object UpgradeLock = new();
+    private static bool _upgradeChecked;
 
     public static WindowPlacementSettings Default => DefaultInstance;
+
+    public void EnsureUpgraded()
+    {
+        if (_upgradeChecked)
+        {
+            return;
+        }
+
+        lock (UpgradeLock)
+        {
+            if (_upgradeChecked)
+            {
+                return;
+            }
+
+            if (!SettingsUpgraded)
+            {
+                try
+                {
+                    Upgrade();
+                }
+                catch (ConfigurationErrorsException)
+                {
+                    // Keep startup resilient even when prior user settings are unreadable.
+                }
+                SettingsUpgraded = true;
+                try
+                {
+                    Save();
+                }
+                catch (ConfigurationErrorsException)
+                {
+                    // Ignore write failures and continue with in-memory settings for this run.
+                }
+            }
+
+            _upgradeChecked = true;
+        }
+    }
+
+    [UserScopedSetting]
+    [DefaultSettingValue("False")]
+    public bool SettingsUpgraded
+    {
+        get => (bool)this[nameof(SettingsUpgraded)];
+        set => this[nameof(SettingsUpgraded)] = value;
+    }
 
     [UserScopedSetting]
     [DefaultSettingValue("False")]

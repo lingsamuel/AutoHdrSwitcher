@@ -10,6 +10,7 @@ Including this README, and this DISCLAIMER.
 Windows desktop app for process-rule configuration and live monitor status.
 When a matched process is running, the app tries to enable HDR only on the display where that process window is shown; when no matched process remains on a display, HDR is turned off for that display.
 If the matched process is found but its game window display is not yet resolvable, HDR fallback target is the primary display until the real window display can be resolved.
+If a matched process had a resolved window before but its window disappears while the process is still alive, it is treated as exiting and does not keep driving HDR target changes until a window appears again.
 Process start/stop event stream is enabled (WMI) so matching and HDR switching react faster than pure polling.
 
 ## Build
@@ -43,13 +44,14 @@ Default behavior:
 - `Close to tray` (`minimizeToTray`) is enabled by default. Closing the window hides it to tray instead of exiting.
 - Minimizing the window also hides it to tray (removed from taskbar).
 - Left-clicking the tray icon toggles restore/minimize.
-- Runtime view shows matched processes, all fullscreen processes, and per-display HDR state (`Supported`, `HDR On`, `Desired`, `Action`).
+- Runtime view shows matched processes, all fullscreen processes, and per-display HDR state (`Supported`, `Primary`, `HDR On`, `Desired`, `Action`).
 - `Auto` column controls per-display auto switching. `Auto=false` means this display is not touched by auto logic.
 - `HDR On` in display table is directly editable for manual HDR on/off per display.
 - Display HDR status keeps refreshing live even when monitor is stopped.
 - `Switch all displays together` can be enabled to ignore per-display mapping and toggle HDR on/off for all displays at once.
 - Each process rule can optionally pin a target display. Available target modes:
   - `Default`: window display, or primary display when window is not found.
+    If a process already had a resolved window and then loses all windows, runtime treats it as exiting and temporarily suspends target mapping instead of falling back to primary.
   - `Switch All Displays`: force HDR desired state to all displays for this match only.
   - Specific display: force HDR desired state to that display.
   If a pinned display is currently unavailable, the value is kept and runtime behavior falls back to `Default`.

@@ -102,6 +102,7 @@ public sealed class MainForm : Form
     public MainForm(string configPath)
     {
         _configPath = Path.GetFullPath(configPath);
+        _windowSettings.EnsureUpgraded();
         InitializeLayout();
         InitializeTrayIcon();
         WireUpEvents();
@@ -2161,6 +2162,7 @@ public sealed class MainForm : Form
             return;
         }
 
+        SaveWindowPlacementToUserSettings();
         _isHiddenToTray = true;
         Hide();
         ShowInTaskbar = false;

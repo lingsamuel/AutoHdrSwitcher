@@ -2,7 +2,7 @@
 
 Version: `1.0.0`  
 Status: `Implemented`  
-Last updated: `2026-02-21`
+Last updated: `2026-02-24`
 
 ## 1. Scope
 
@@ -49,9 +49,10 @@ For each matched process:
 
 1. Resolve effective target by priority: process-level override (`processTargetDisplayOverrides`) > rule-level `targetDisplay` > `Default`.
 2. `Default` means: use window display; if not resolvable, fallback target is the primary display.
-3. `Switch All Displays` means this match requests HDR desired state for all displays (without requiring global `switchAllDisplaysTogether`).
-4. If effective target is a concrete display and currently available, force that display.
-5. If effective target is currently unavailable, keep stored value but treat runtime target as `Default`.
+3. If a process had a resolved window in prior scans but now has no window, treat it as `exiting`: suspend runtime display mapping (do not fallback to primary) until a window appears again.
+4. `Switch All Displays` means this match requests HDR desired state for all displays (without requiring global `switchAllDisplaysTogether`).
+5. If effective target is a concrete display and currently available, force that display.
+6. If effective target is currently unavailable, keep stored value but treat runtime target as `Default`.
 
 ### 3.3 Fullscreen Monitoring
 
@@ -99,10 +100,11 @@ Display runtime table columns:
 1. `Display`
 2. `Monitor`
 3. `Supported`
-4. `Auto`
-5. `HDR On`
-6. `Desired`
-7. `Action`
+4. `Primary`
+5. `Auto`
+6. `HDR On`
+7. `Desired`
+8. `Action`
 
 ### 3.6 Monitoring Model
 
