@@ -6,6 +6,8 @@ public sealed class HdrDisplayStatus
 
     public required string FriendlyName { get; init; }
 
+    public required bool IsPrimary { get; init; }
+
     public required bool IsHdrSupported { get; init; }
 
     public required bool IsHdrEnabled { get; init; }

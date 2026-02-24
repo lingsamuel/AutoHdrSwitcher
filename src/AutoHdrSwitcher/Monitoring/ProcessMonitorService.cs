@@ -74,6 +74,7 @@ public sealed class ProcessMonitorService
 
     private readonly ProcessDisplayResolver _displayResolver = new();
     private readonly HdrController _hdrController = new();
+    private readonly HashSet<int> _processesWithObservedWindow = new();
 
     public static string DefaultWindowsPathPrefixIgnoreKey { get; } =
         BuildPathPrefixIgnoreKey(DefaultWindowsPathPrefix);
@@ -102,6 +103,7 @@ public sealed class ProcessMonitorService
         var evaluationStopwatch = Stopwatch.StartNew();
         var processArray = Process.GetProcesses();
         var resolvedWindows = _displayResolver.CaptureProcessWindows();
+        var activeProcessIds = BuildActiveProcessIdSet(processArray);
         var matches = new List<ProcessMatchResult>();
         var fullscreenProcesses = new List<FullscreenProcessInfo>();
         var matchedPids = new HashSet<int>();
@@ -152,6 +154,11 @@ public sealed class ProcessMonitorService
                             processPaths[processId] = discoveredPath;
                         }
 
+                        if (resolvedWindows.ContainsKey(processId))
+                        {
+                            _processesWithObservedWindow.Add(processId);
+                        }
+
                         var targetResolution = ResolveDisplayForRule(
                             processId,
                             resolvedWindows,
@@ -162,7 +169,8 @@ public sealed class ProcessMonitorService
                                 processTargetDisplayOverrides,
                                 out var processTargetKey,
                                 out var hasProcessTargetOverride),
-                            availableDisplays);
+                            availableDisplays,
+                            _processesWithObservedWindow.Contains(processId));
                         if (!string.IsNullOrWhiteSpace(targetResolution.DesiredDisplay))
                         {
                             matchedDisplays.Add(targetResolution.DesiredDisplay);
@@ -204,6 +212,11 @@ public sealed class ProcessMonitorService
 
         foreach (var window in resolvedWindows.Values.Where(static value => value.IsFullscreenLike))
         {
+            if (monitorAllFullscreenProcesses)
+            {
+                _processesWithObservedWindow.Add(window.ProcessId);
+            }
+
             var name = processNames.TryGetValue(window.ProcessId, out var safeName)
                 ? safeName
                 : $"PID-{window.ProcessId}";
@@ -249,6 +262,7 @@ public sealed class ProcessMonitorService
             switchAllDisplaysTogether,
             displayAutoModes,
             forceSwitchAllDisplaysByTarget);
+        CleanupObservedWindowState(activeProcessIds);
         evaluationStopwatch.Stop();
         AppLogger.Info(
             $"Process evaluation finished. durationMs={evaluationStopwatch.Elapsed.TotalMilliseconds:F3}; processCount={processArray.Length}; windowCount={resolvedWindows.Count}; matches={matches.Count}; fullscreen={fullscreenProcesses.Count}; pathLookupAttempts={pathLookupAttempts}; pathLookupSucceeded={pathLookupSucceeded}; requiresPathCandidates={requiresPathCandidates}; hasPathTargetOverrides={hasPathTargetOverrides}");
@@ -278,6 +292,7 @@ public sealed class ProcessMonitorService
     {
         ArgumentNullException.ThrowIfNull(displayAutoModes);
         var statuses = new List<HdrDisplayStatus>();
+        var primaryDisplayName = GetPrimaryDisplayName();
         var displays = _hdrController.GetDisplays();
         var coveredDisplays = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var display in displays)
@@ -287,6 +302,7 @@ public sealed class ProcessMonitorService
             {
                 Display = display.GdiDeviceName,
                 FriendlyName = display.FriendlyName,
+                IsPrimary = IsPrimaryDisplay(display.GdiDeviceName, primaryDisplayName),
                 IsHdrSupported = display.IsHdrSupported,
                 IsHdrEnabled = display.IsHdrEnabled,
                 DesiredHdrEnabled = display.IsHdrEnabled,
@@ -308,6 +324,7 @@ public sealed class ProcessMonitorService
             {
                 Display = screen.DeviceName,
                 FriendlyName = screen.Primary ? $"{screen.DeviceName} (Primary)" : screen.DeviceName,
+                IsPrimary = IsPrimaryDisplay(screen.DeviceName, primaryDisplayName),
                 IsHdrSupported = false,
                 IsHdrEnabled = false,
                 DesiredHdrEnabled = false,
@@ -472,11 +489,27 @@ public sealed class ProcessMonitorService
         int processId,
         IReadOnlyDictionary<int, ResolvedProcessWindow> resolvedWindows,
         string? configuredTargetDisplay,
-        IReadOnlySet<string> availableDisplays)
+        IReadOnlySet<string> availableDisplays,
+        bool hasObservedWindow)
     {
         var configured = string.IsNullOrWhiteSpace(configuredTargetDisplay)
             ? null
             : configuredTargetDisplay.Trim();
+        if (!resolvedWindows.ContainsKey(processId) && hasObservedWindow)
+        {
+            var exitingLabel = string.IsNullOrWhiteSpace(configured)
+                ? "(window disappeared -> exiting)"
+                : $"(window disappeared -> exiting; target suspended: {configured})";
+            return new DisplayTargetResolution
+            {
+                DesiredDisplay = null,
+                ConfiguredTargetDisplay = configured,
+                DisplayLabel = exitingLabel,
+                IsFullscreenLike = false,
+                RequestAllDisplays = false
+            };
+        }
+
         if (!string.IsNullOrWhiteSpace(configured))
         {
             if (string.Equals(
@@ -534,6 +567,29 @@ public sealed class ProcessMonitorService
         }
 
         return ResolveDefaultDisplay(processId, resolvedWindows);
+    }
+
+    private static HashSet<int> BuildActiveProcessIdSet(IEnumerable<Process> processes)
+    {
+        var ids = new HashSet<int>();
+        foreach (var process in processes)
+        {
+            try
+            {
+                ids.Add(process.Id);
+            }
+            catch (InvalidOperationException)
+            {
+                // Process exited while enumerating.
+            }
+        }
+
+        return ids;
+    }
+
+    private void CleanupObservedWindowState(IReadOnlySet<int> activeProcessIds)
+    {
+        _processesWithObservedWindow.RemoveWhere(pid => !activeProcessIds.Contains(pid));
     }
 
     private DisplayTargetResolution ResolveDefaultDisplay(
@@ -610,6 +666,7 @@ public sealed class ProcessMonitorService
         bool forceSwitchAllDisplaysByTarget)
     {
         var statuses = new List<HdrDisplayStatus>();
+        var primaryDisplayName = GetPrimaryDisplayName();
         var displays = _hdrController.GetDisplays();
         var coveredDisplays = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var desiredForAllDisplays =
@@ -669,6 +726,7 @@ public sealed class ProcessMonitorService
             {
                 Display = display.GdiDeviceName,
                 FriendlyName = display.FriendlyName,
+                IsPrimary = IsPrimaryDisplay(display.GdiDeviceName, primaryDisplayName),
                 IsHdrSupported = display.IsHdrSupported,
                 IsHdrEnabled = hdrEnabled,
                 DesiredHdrEnabled = desired,
@@ -691,6 +749,7 @@ public sealed class ProcessMonitorService
             {
                 Display = screen.DeviceName,
                 FriendlyName = screen.Primary ? $"{screen.DeviceName} (Primary)" : screen.DeviceName,
+                IsPrimary = IsPrimaryDisplay(screen.DeviceName, primaryDisplayName),
                 IsHdrSupported = false,
                 IsHdrEnabled = false,
                 DesiredHdrEnabled = ResolveDisplayAutoMode(screen.DeviceName, displayAutoModes) &&
@@ -710,6 +769,26 @@ public sealed class ProcessMonitorService
         IReadOnlyDictionary<string, bool> displayAutoModes)
     {
         return !displayAutoModes.TryGetValue(displayName, out var autoMode) || autoMode;
+    }
+
+    private string? GetPrimaryDisplayName()
+    {
+        if (_displayResolver.TryGetPrimaryDisplay(out var primaryDisplay) &&
+            !string.IsNullOrWhiteSpace(primaryDisplay))
+        {
+            return primaryDisplay;
+        }
+
+        var primaryScreenDeviceName = Screen.PrimaryScreen?.DeviceName;
+        return string.IsNullOrWhiteSpace(primaryScreenDeviceName)
+            ? null
+            : primaryScreenDeviceName;
+    }
+
+    private static bool IsPrimaryDisplay(string displayName, string? primaryDisplayName)
+    {
+        return !string.IsNullOrWhiteSpace(primaryDisplayName) &&
+            string.Equals(displayName, primaryDisplayName, StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool TryGetExecutablePath(Process process, out string executablePath)

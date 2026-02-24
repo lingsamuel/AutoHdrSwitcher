@@ -6,6 +6,8 @@ public sealed class DisplayHdrRow
 
     public string FriendlyName { get; set; } = string.Empty;
 
+    public bool Primary { get; set; }
+
     public bool Supported { get; set; }
 
     public bool AutoMode { get; set; } = true;

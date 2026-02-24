@@ -658,6 +658,14 @@ public sealed class MainForm : Form
         });
         _displayGrid.Columns.Add(new DataGridViewCheckBoxColumn
         {
+            HeaderText = "Primary",
+            DataPropertyName = nameof(DisplayHdrRow.Primary),
+            ToolTipText = string.Empty,
+            ReadOnly = true,
+            Width = 75
+        });
+        _displayGrid.Columns.Add(new DataGridViewCheckBoxColumn
+        {
             HeaderText = "Auto",
             DataPropertyName = nameof(DisplayHdrRow.AutoMode),
             ToolTipText = string.Empty,
@@ -1266,6 +1274,7 @@ public sealed class MainForm : Form
                 {
                     Display = display.Display,
                     FriendlyName = display.FriendlyName,
+                    Primary = display.IsPrimary,
                     Supported = display.IsHdrSupported,
                     AutoMode = GetDisplayAutoMode(display.Display),
                     HdrEnabled = display.IsHdrEnabled,
@@ -2314,6 +2323,7 @@ public sealed class MainForm : Form
                 {
                     Display = screen.DeviceName,
                     FriendlyName = screen.Primary ? $"{screen.DeviceName} (Primary)" : screen.DeviceName,
+                    Primary = screen.Primary,
                     Supported = false,
                     AutoMode = GetDisplayAutoMode(screen.DeviceName),
                     HdrEnabled = false,
