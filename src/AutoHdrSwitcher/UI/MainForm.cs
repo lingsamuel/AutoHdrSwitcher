@@ -26,16 +26,23 @@ public sealed class MainForm : Form
     private const int TraceStartProactiveRefreshCount = 4;
     private const int FullscreenAllEventRefreshThrottleMs = 1000;
     private const int PendingStartEventRetentionSeconds = 180;
+    private const int MaxRecentStartedProcessRows = 10;
+    private const int MaxRecentRowsPerProcessName = 2;
+    private const int RecentSameNameBurstWindowSeconds = 8;
     private static readonly Icon? AppIconTemplate = LoadAppIconTemplate();
 
     private readonly string _configPath;
     private readonly ProcessMonitorService _monitorService = new();
     private readonly ProcessEventMonitor _processEventMonitor = new();
     private readonly WindowPlacementSettings _windowSettings = WindowPlacementSettings.Default;
+    private readonly int _selfProcessId = Environment.ProcessId;
+    private readonly string _selfProcessNameNormalized = GetCurrentProcessNameNormalized();
     private readonly BindingList<ProcessWatchRuleRow> _ruleRows = new();
     private readonly BindingList<ProcessMatchRow> _matchRows = new();
+    private readonly BindingList<RecentStartedProcessRow> _recentStartedRows = new();
     private readonly BindingList<FullscreenProcessRow> _fullscreenRows = new();
     private readonly BindingList<DisplayHdrRow> _displayRows = new();
+    private readonly List<RecentStartedProcessEntry> _recentStartedProcesses = new();
     private readonly Dictionary<string, bool> _fullscreenIgnoreMap = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, bool> _displayAutoModes = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _processTargetDisplayOverrides = new(StringComparer.OrdinalIgnoreCase);
@@ -49,11 +56,13 @@ public sealed class MainForm : Form
     private SplitContainer _runtimeBottomSplit = null!;
     private DataGridView _ruleGrid = null!;
     private DataGridView _matchGrid = null!;
+    private DataGridView _recentStartedGrid = null!;
     private DataGridView _fullscreenGrid = null!;
     private DataGridView _displayGrid = null!;
     private DataGridViewComboBoxColumn _ruleTargetDisplayColumn = null!;
     private DataGridViewComboBoxColumn _matchTargetDisplayColumn = null!;
     private GroupBox _runtimeGroup = null!;
+    private GroupBox _recentStartedGroup = null!;
     private GroupBox _fullscreenGroup = null!;
     private GroupBox _displayGroup = null!;
     private Label _pollLabel = null!;
@@ -79,6 +88,7 @@ public sealed class MainForm : Form
     private bool _suppressFullscreenIgnoreEvents;
     private bool _suppressDisplayHdrToggleEvents;
     private bool _suppressMatchTargetEvents;
+    private bool _suppressRecentStartedMatchEvents;
     private bool _hasUnsavedChanges;
     private bool _refreshInFlight;
     private bool _snapshotRefreshPending;
@@ -548,6 +558,60 @@ public sealed class MainForm : Form
         });
         _runtimeSplit.Panel1.Controls.Add(_matchGrid);
 
+        _recentStartedGrid = new DataGridView
+        {
+            Dock = DockStyle.Fill,
+            AutoGenerateColumns = false,
+            DataSource = _recentStartedRows,
+            ReadOnly = false,
+            TabStop = false,
+            AllowUserToAddRows = false,
+            AllowUserToDeleteRows = false,
+            ShowCellToolTips = false,
+            SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+            MultiSelect = false
+        };
+        ConfigureGridStyle(_recentStartedGrid);
+        _recentStartedGrid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            HeaderText = "PID",
+            DataPropertyName = nameof(RecentStartedProcessRow.ProcessId),
+            ToolTipText = string.Empty,
+            ReadOnly = true,
+            Width = 85
+        });
+        _recentStartedGrid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            HeaderText = "Process",
+            DataPropertyName = nameof(RecentStartedProcessRow.ProcessName),
+            ToolTipText = string.Empty,
+            ReadOnly = true,
+            AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill
+        });
+        _recentStartedGrid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            HeaderText = "Started",
+            DataPropertyName = nameof(RecentStartedProcessRow.StartedAt),
+            ToolTipText = string.Empty,
+            ReadOnly = true,
+            Width = 120
+        });
+        _recentStartedGrid.Columns.Add(new DataGridViewCheckBoxColumn
+        {
+            HeaderText = "Matched",
+            DataPropertyName = nameof(RecentStartedProcessRow.Matched),
+            ToolTipText = string.Empty,
+            ReadOnly = false,
+            Width = 90
+        });
+        _recentStartedGroup = new GroupBox
+        {
+            Text = "Recently Started Processes (Latest: 0)",
+            Dock = DockStyle.Fill,
+            Padding = new Padding(8)
+        };
+        _recentStartedGroup.Controls.Add(_recentStartedGrid);
+
         _fullscreenGrid = new DataGridView
         {
             Dock = DockStyle.Fill,
@@ -617,7 +681,18 @@ public sealed class MainForm : Form
             Padding = new Padding(8)
         };
         _fullscreenGroup.Controls.Add(_fullscreenGrid);
-        _runtimeBottomSplit.Panel1.Controls.Add(_fullscreenGroup);
+        var runtimeUpperStatusLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            RowCount = 2,
+            ColumnCount = 1
+        };
+        runtimeUpperStatusLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        runtimeUpperStatusLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+        runtimeUpperStatusLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+        runtimeUpperStatusLayout.Controls.Add(_recentStartedGroup, 0, 0);
+        runtimeUpperStatusLayout.Controls.Add(_fullscreenGroup, 0, 1);
+        _runtimeBottomSplit.Panel1.Controls.Add(runtimeUpperStatusLayout);
 
         _displayGrid = new DataGridView
         {
@@ -869,6 +944,20 @@ public sealed class MainForm : Form
             eventArgs.ThrowException = false;
             SetMonitorStatus($"Matched process input error: {eventArgs.Exception?.Message ?? "invalid value"}");
         };
+        _recentStartedGrid.CurrentCellDirtyStateChanged += (_, _) =>
+        {
+            if (_recentStartedGrid.IsCurrentCellDirty)
+            {
+                _recentStartedGrid.CommitEdit(DataGridViewDataErrorContexts.Commit);
+            }
+        };
+        _recentStartedGrid.CellValueChanged += (_, e) =>
+            HandleRecentStartedGridValueChanged(e.RowIndex, e.ColumnIndex);
+        _recentStartedGrid.DataError += (_, eventArgs) =>
+        {
+            eventArgs.ThrowException = false;
+            SetMonitorStatus($"Recent started process input error: {eventArgs.Exception?.Message ?? "invalid value"}");
+        };
         _fullscreenGrid.CurrentCellDirtyStateChanged += (_, _) =>
         {
             if (_fullscreenGrid.IsCurrentCellDirty)
@@ -933,6 +1022,7 @@ public sealed class MainForm : Form
 
             ClearPassiveGridSelection(_matchGrid);
         };
+        _recentStartedGrid.SelectionChanged += (_, _) => ClearPassiveGridSelection(_recentStartedGrid);
         _displayGrid.SelectionChanged += (_, _) => ClearPassiveGridSelection(_displayGrid);
         _fullscreenGrid.SelectionChanged += (_, _) => ClearPassiveGridSelection(_fullscreenGrid);
 
@@ -1012,6 +1102,7 @@ public sealed class MainForm : Form
     private void MarkDirtyAndRefreshRules(string refreshReason)
     {
         MarkDirty();
+        RebuildRecentStartedRows(BuildRulesFromUi(commitEdits: false));
         TriggerRuleRefreshIfMonitoring(refreshReason);
     }
 
@@ -1099,7 +1190,7 @@ public sealed class MainForm : Form
             stopwatch.Stop();
             AppLogger.Info(
                 $"Snapshot refresh evaluated. requestId={requestId}; reason={reason}; durationMs={stopwatch.Elapsed.TotalMilliseconds:F3}; processes={snapshot.ProcessCount}; matches={snapshot.Matches.Count}; fullscreen={snapshot.FullscreenProcesses.Count}; displays={snapshot.Displays.Count}");
-            ApplySnapshot(snapshot, rules.Count);
+            ApplySnapshot(snapshot, rules);
             LogMatchedStartEventLatencies(snapshot, startedAtUtc);
         }
         catch (Exception ex)
@@ -1181,7 +1272,34 @@ public sealed class MainForm : Form
         }
     }
 
-    private void ApplySnapshot(ProcessMonitorSnapshot snapshot, int activeRuleCount)
+    private void RebuildRecentStartedRows(IReadOnlyCollection<ProcessWatchRule> rules)
+    {
+        _suppressRecentStartedMatchEvents = true;
+        try
+        {
+            _recentStartedRows.Clear();
+            foreach (var entry in _recentStartedProcesses)
+            {
+                _recentStartedRows.Add(new RecentStartedProcessRow
+                {
+                    SequenceId = entry.SequenceId,
+                    ProcessId = entry.ProcessId,
+                    ProcessName = entry.ProcessName,
+                    StartedAt = entry.StartedAtUtc.ToLocalTime().ToString("HH:mm:ss"),
+                    RulePattern = entry.RulePattern,
+                    Matched = IsRuleNameMatch(entry.RawProcessName, rules)
+                });
+            }
+        }
+        finally
+        {
+            _suppressRecentStartedMatchEvents = false;
+        }
+
+        _recentStartedGroup.Text = $"Recently Started Processes (Latest: {_recentStartedRows.Count})";
+    }
+
+    private void ApplySnapshot(ProcessMonitorSnapshot snapshot, IReadOnlyCollection<ProcessWatchRule> activeRules)
     {
         _suppressMatchTargetEvents = true;
         try
@@ -1234,10 +1352,12 @@ public sealed class MainForm : Form
             });
         }
         _suppressFullscreenIgnoreEvents = false;
+        RebuildRecentStartedRows(activeRules);
 
         ApplyDisplayRows(snapshot.Displays);
 
         ClearPassiveGridSelection(_matchGrid);
+        ClearPassiveGridSelection(_recentStartedGrid);
         ClearPassiveGridSelection(_fullscreenGrid);
         ClearPassiveGridSelection(_displayGrid);
         if (!_ruleGrid.IsCurrentCellInEditMode && !_ruleGrid.Focused)
@@ -1252,7 +1372,7 @@ public sealed class MainForm : Form
         _displayGroup.Text = $"Display HDR Status ({hdrSummary})";
         _snapshotLabel.Text = $"Last scan: {snapshot.CollectedAt:HH:mm:ss} | Processes: {snapshot.ProcessCount}";
         var modeLabel = GetMonitoringModeLabel();
-        if (activeRuleCount == 0)
+        if (activeRules.Count == 0)
         {
             SetMonitorStatus($"{modeLabel} (no rules configured) | {hdrSummary}");
             return;
@@ -1379,6 +1499,7 @@ public sealed class MainForm : Form
             SetSaveStatus(addedDefaultIgnoreEntry
                 ? "Config: loaded (default fullscreen ignores added)"
                 : "Config: loaded");
+            RebuildRecentStartedRows(BuildRulesFromUi(commitEdits: false));
             _ruleGrid.ClearSelection();
         }
         finally
@@ -1765,6 +1886,82 @@ public sealed class MainForm : Form
         _fullscreenIgnoreMap[row.IgnoreKey] = row.Ignore;
         MarkDirty();
         _ = RefreshSnapshotAsync("fullscreen-ignore-changed");
+    }
+
+    private void HandleRecentStartedGridValueChanged(int rowIndex, int columnIndex)
+    {
+        if (_suppressRecentStartedMatchEvents || rowIndex < 0 || rowIndex >= _recentStartedRows.Count)
+        {
+            return;
+        }
+
+        var matchedColumn = _recentStartedGrid.Columns
+            .Cast<DataGridViewColumn>()
+            .FirstOrDefault(static c => c.DataPropertyName == nameof(RecentStartedProcessRow.Matched));
+        if (matchedColumn is null || columnIndex != matchedColumn.Index)
+        {
+            return;
+        }
+
+        var row = _recentStartedRows[rowIndex];
+        var entry = _recentStartedProcesses.FirstOrDefault(process => process.SequenceId == row.SequenceId);
+        if (entry is null)
+        {
+            RebuildRecentStartedRows(BuildRulesFromUi(commitEdits: false));
+            return;
+        }
+
+        var currentRules = BuildRulesFromUi(commitEdits: false);
+        var matchedByRule = IsRuleNameMatch(entry.RawProcessName, currentRules);
+
+        // Matched checkbox is one-way: user can set true, but cannot revert to false.
+        if (!row.Matched)
+        {
+            RebuildRecentStartedRows(currentRules);
+            return;
+        }
+
+        if (matchedByRule)
+        {
+            RebuildRecentStartedRows(currentRules);
+            return;
+        }
+
+        var addedRule = TryAddManualRuleForRecentStartedProcess(entry.RulePattern);
+        RebuildRecentStartedRows(BuildRulesFromUi(commitEdits: false));
+        if (!addedRule)
+        {
+            return;
+        }
+
+        MarkDirtyAndRefreshRules("recent-started-process-manual-match");
+    }
+
+    private bool TryAddManualRuleForRecentStartedProcess(string processNameOrPattern)
+    {
+        var normalizedPattern = NormalizeProcessNameForManualRule(processNameOrPattern);
+        if (string.IsNullOrWhiteSpace(normalizedPattern))
+        {
+            return false;
+        }
+
+        CommitPendingRuleEdits();
+        var currentRules = BuildRulesFromUi(commitEdits: false);
+        if (IsRuleNameMatch(normalizedPattern, currentRules))
+        {
+            return false;
+        }
+
+        _ruleRows.Add(new ProcessWatchRuleRow
+        {
+            Pattern = normalizedPattern,
+            ExactMatch = true,
+            CaseSensitive = false,
+            RegexMode = false,
+            Enabled = true,
+            TargetDisplay = ProcessWatchRuleRow.DefaultTargetDisplayValue
+        });
+        return true;
     }
 
     private async Task HandleDisplayGridValueChangedAsync(int rowIndex, int columnIndex)
@@ -2295,6 +2492,7 @@ public sealed class MainForm : Form
     {
         _ruleGrid.ClearSelection();
         ClearPassiveGridSelection(_matchGrid);
+        ClearPassiveGridSelection(_recentStartedGrid);
         ClearPassiveGridSelection(_fullscreenGrid);
         ClearPassiveGridSelection(_displayGrid);
     }
@@ -2459,6 +2657,7 @@ public sealed class MainForm : Form
 
         var rules = BuildRulesFromUi(commitEdits: false);
         CleanupStalePendingStartEvents();
+        TrackRecentStartedProcess(e, rules);
         if (ShouldIgnoreProcessEventByDefault(e, rules))
         {
             AppLogger.Info(
@@ -2536,26 +2735,125 @@ public sealed class MainForm : Form
         ProcessEventNotification e,
         IReadOnlyCollection<ProcessWatchRule> rules)
     {
-        if (rules.Count == 0)
+        return IsRuleNameMatch(e.ProcessName, rules);
+    }
+
+    private static bool IsRuleNameMatch(string processName, IReadOnlyCollection<ProcessWatchRule> rules)
+    {
+        if (rules.Count == 0 || string.IsNullOrWhiteSpace(processName))
         {
             return false;
         }
 
-        var name = e.ProcessName;
-        if (string.IsNullOrWhiteSpace(name))
+        var name = processName.Trim();
+        var normalizedNoExe = NormalizeProcessNameForManualRule(name);
+        var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        candidates.Add(name);
+        if (!string.IsNullOrWhiteSpace(normalizedNoExe))
         {
-            return false;
+            candidates.Add(normalizedNoExe);
+            candidates.Add(normalizedNoExe + ".exe");
         }
 
-        if (ProcessWatchMatcher.IsMatchAny(name, rules))
+        if (!name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
         {
-            return true;
+            candidates.Add(name + ".exe");
         }
 
-        var exeName = name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
-            ? name
-            : name + ".exe";
-        return ProcessWatchMatcher.IsMatchAny(exeName, rules);
+        foreach (var candidate in candidates)
+        {
+            if (ProcessWatchMatcher.IsMatchAny(candidate, rules))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void TrackRecentStartedProcess(ProcessEventNotification e, IReadOnlyCollection<ProcessWatchRule> rules)
+    {
+        if (!string.Equals(e.EventType, "start", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var rawProcessName = string.IsNullOrWhiteSpace(e.ProcessName)
+            ? "(unknown)"
+            : e.ProcessName.Trim();
+        var normalizedName = NormalizeProcessNameForEventFilter(rawProcessName);
+        if (e.ProcessId == _selfProcessId ||
+            (!string.IsNullOrWhiteSpace(normalizedName) &&
+             string.Equals(normalizedName, _selfProcessNameNormalized, StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(normalizedName) &&
+            ProcessMonitorService.IsDefaultIgnoredProcessName(normalizedName) &&
+            !IsRuleNameMatch(rawProcessName, rules))
+        {
+            return;
+        }
+
+        var startedAtUtc = e.EventCreatedAtUtc ?? e.ReceivedAtUtc;
+        if (e.ProcessId > 0 &&
+            _recentStartedProcesses.Any(process => process.ProcessId == e.ProcessId))
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(normalizedName) &&
+            _recentStartedProcesses.Any(process =>
+                string.Equals(process.NormalizedProcessName, normalizedName, StringComparison.OrdinalIgnoreCase) &&
+                Math.Abs((startedAtUtc - process.StartedAtUtc).TotalSeconds) <= RecentSameNameBurstWindowSeconds))
+        {
+            return;
+        }
+
+        var rulePattern = NormalizeProcessNameForManualRule(rawProcessName);
+        if (string.IsNullOrWhiteSpace(rulePattern))
+        {
+            rulePattern = rawProcessName;
+        }
+
+        _recentStartedProcesses.Insert(0, new RecentStartedProcessEntry
+        {
+            SequenceId = e.SequenceId,
+            ProcessId = e.ProcessId,
+            ProcessName = rulePattern,
+            RawProcessName = rawProcessName,
+            NormalizedProcessName = normalizedName,
+            RulePattern = rulePattern,
+            StartedAtUtc = startedAtUtc
+        });
+
+        if (!string.IsNullOrWhiteSpace(normalizedName))
+        {
+            var overflowIndexesForSameName = _recentStartedProcesses
+                .Select((process, index) => (process, index))
+                .Where(item => string.Equals(
+                    item.process.NormalizedProcessName,
+                    normalizedName,
+                    StringComparison.OrdinalIgnoreCase))
+                .Skip(MaxRecentRowsPerProcessName)
+                .Select(static item => item.index)
+                .OrderByDescending(static index => index)
+                .ToArray();
+            foreach (var overflowIndex in overflowIndexesForSameName)
+            {
+                _recentStartedProcesses.RemoveAt(overflowIndex);
+            }
+        }
+
+        if (_recentStartedProcesses.Count > MaxRecentStartedProcessRows)
+        {
+            _recentStartedProcesses.RemoveRange(
+                MaxRecentStartedProcessRows,
+                _recentStartedProcesses.Count - MaxRecentStartedProcessRows);
+        }
+
+        RebuildRecentStartedRows(rules);
     }
 
     private static bool ShouldIgnoreProcessEventByDefault(
@@ -2603,6 +2901,40 @@ public sealed class MainForm : Form
         }
 
         return normalized;
+    }
+
+    private static string GetCurrentProcessNameNormalized()
+    {
+        try
+        {
+            using var current = Process.GetCurrentProcess();
+            return NormalizeProcessNameForEventFilter(current.ProcessName);
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    private static string NormalizeProcessNameForManualRule(string processName)
+    {
+        if (string.IsNullOrWhiteSpace(processName))
+        {
+            return string.Empty;
+        }
+
+        var normalized = processName.Trim();
+        if (normalized.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = normalized[..^4];
+        }
+
+        while (normalized.EndsWith(".", StringComparison.Ordinal))
+        {
+            normalized = normalized[..^1];
+        }
+
+        return normalized.Trim();
     }
 
     private void TrackStartStopEventForLatency(ProcessEventNotification e)
@@ -2715,6 +3047,23 @@ public sealed class MainForm : Form
         string ProcessName,
         DateTimeOffset EventReceivedAtUtc,
         DateTimeOffset? EventCreatedAtUtc);
+
+    private sealed class RecentStartedProcessEntry
+    {
+        public required long SequenceId { get; init; }
+
+        public required int ProcessId { get; init; }
+
+        public required string RawProcessName { get; init; }
+
+        public required string ProcessName { get; init; }
+
+        public required string NormalizedProcessName { get; init; }
+
+        public required string RulePattern { get; init; }
+
+        public required DateTimeOffset StartedAtUtc { get; init; }
+    }
 
     private sealed record DisplayTargetOption(string Value, string Label);
 }
