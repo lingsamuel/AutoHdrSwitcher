@@ -30,6 +30,8 @@ public sealed class MainForm : Form
     private const int MaxRecentRowsPerProcessName = 2;
     private const int RecentSameNameBurstWindowSeconds = 8;
     private static readonly Icon? AppIconTemplate = LoadAppIconTemplate();
+    private static readonly HashSet<string> DefaultFullscreenIgnoreKeys =
+        new(ProcessMonitorService.DefaultIgnoreKeys, StringComparer.OrdinalIgnoreCase);
 
     private readonly string _configPath;
     private readonly ProcessMonitorService _monitorService = new();
@@ -1274,21 +1276,33 @@ public sealed class MainForm : Form
 
     private void RebuildRecentStartedRows(IReadOnlyCollection<ProcessWatchRule> rules)
     {
+        var projectedRows = new List<RecentStartedProcessRow>(_recentStartedProcesses.Count);
+        foreach (var entry in _recentStartedProcesses)
+        {
+            projectedRows.Add(new RecentStartedProcessRow
+            {
+                SequenceId = entry.SequenceId,
+                ProcessId = entry.ProcessId,
+                ProcessName = entry.ProcessName,
+                StartedAt = entry.StartedAtUtc.ToLocalTime().ToString("HH:mm:ss"),
+                RulePattern = entry.RulePattern,
+                Matched = IsRuleNameMatch(entry.RawProcessName, rules)
+            });
+        }
+
+        if (AreRecentStartedRowsEquivalent(projectedRows))
+        {
+            _recentStartedGroup.Text = $"Recently Started Processes (Latest: {_recentStartedRows.Count})";
+            return;
+        }
+
         _suppressRecentStartedMatchEvents = true;
         try
         {
             _recentStartedRows.Clear();
-            foreach (var entry in _recentStartedProcesses)
+            foreach (var row in projectedRows)
             {
-                _recentStartedRows.Add(new RecentStartedProcessRow
-                {
-                    SequenceId = entry.SequenceId,
-                    ProcessId = entry.ProcessId,
-                    ProcessName = entry.ProcessName,
-                    StartedAt = entry.StartedAtUtc.ToLocalTime().ToString("HH:mm:ss"),
-                    RulePattern = entry.RulePattern,
-                    Matched = IsRuleNameMatch(entry.RawProcessName, rules)
-                });
+                _recentStartedRows.Add(row);
             }
         }
         finally
@@ -1297,6 +1311,31 @@ public sealed class MainForm : Form
         }
 
         _recentStartedGroup.Text = $"Recently Started Processes (Latest: {_recentStartedRows.Count})";
+    }
+
+    private bool AreRecentStartedRowsEquivalent(IReadOnlyList<RecentStartedProcessRow> projectedRows)
+    {
+        if (_recentStartedRows.Count != projectedRows.Count)
+        {
+            return false;
+        }
+
+        for (var i = 0; i < projectedRows.Count; i++)
+        {
+            var current = _recentStartedRows[i];
+            var next = projectedRows[i];
+            if (current.SequenceId != next.SequenceId ||
+                current.ProcessId != next.ProcessId ||
+                current.Matched != next.Matched ||
+                !string.Equals(current.ProcessName, next.ProcessName, StringComparison.Ordinal) ||
+                !string.Equals(current.StartedAt, next.StartedAt, StringComparison.Ordinal) ||
+                !string.Equals(current.RulePattern, next.RulePattern, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private void ApplySnapshot(ProcessMonitorSnapshot snapshot, IReadOnlyCollection<ProcessWatchRule> activeRules)
@@ -1330,6 +1369,7 @@ public sealed class MainForm : Form
 
         _fullscreenRows.Clear();
         _suppressFullscreenIgnoreEvents = true;
+        var hiddenDefaultIgnoredFullscreenCount = 0;
         foreach (var fullscreen in snapshot.FullscreenProcesses)
         {
             if (fullscreen.IsDefaultIgnoreApplied &&
@@ -1339,6 +1379,15 @@ public sealed class MainForm : Form
                 MarkDirty();
             }
 
+            var ignore = ResolveIgnoreFromMap(fullscreen);
+            var isDefaultIgnoreKey = DefaultFullscreenIgnoreKeys.Contains(fullscreen.IgnoreKey);
+            var isDefaultIgnoredEntry = fullscreen.IsDefaultIgnoreApplied || isDefaultIgnoreKey;
+            if (isDefaultIgnoredEntry)
+            {
+                hiddenDefaultIgnoredFullscreenCount++;
+                continue;
+            }
+
             _fullscreenRows.Add(new FullscreenProcessRow
             {
                 ProcessId = fullscreen.ProcessId,
@@ -1346,9 +1395,9 @@ public sealed class MainForm : Form
                 ExecutablePath = fullscreen.ExecutablePath,
                 Display = fullscreen.Display,
                 MatchedByRule = fullscreen.MatchedByRule,
-                Ignore = ResolveIgnoreFromMap(fullscreen),
+                Ignore = ignore,
                 IgnoreKey = fullscreen.IgnoreKey,
-                IsDefaultIgnoreApplied = fullscreen.IsDefaultIgnoreApplied
+                IsDefaultIgnoreApplied = isDefaultIgnoredEntry
             });
         }
         _suppressFullscreenIgnoreEvents = false;
@@ -1367,7 +1416,9 @@ public sealed class MainForm : Form
 
         UpdateTrayMatchIndicator(GetTrayIndicatorMatchCount(snapshot));
         _runtimeGroup.Text = $"Runtime Status (Matches: {snapshot.Matches.Count})";
-        _fullscreenGroup.Text = $"Detected Fullscreen Processes (Fullscreen: {snapshot.FullscreenProcesses.Count})";
+        _fullscreenGroup.Text = hiddenDefaultIgnoredFullscreenCount > 0
+            ? $"Detected Fullscreen Processes (Fullscreen: {_fullscreenRows.Count}, hidden default-ignored: {hiddenDefaultIgnoredFullscreenCount})"
+            : $"Detected Fullscreen Processes (Fullscreen: {_fullscreenRows.Count})";
         var hdrSummary = BuildHdrSummary(snapshot.Displays);
         _displayGroup.Text = $"Display HDR Status ({hdrSummary})";
         _snapshotLabel.Text = $"Last scan: {snapshot.CollectedAt:HH:mm:ss} | Processes: {snapshot.ProcessCount}";
@@ -2344,6 +2395,11 @@ public sealed class MainForm : Form
 
     private bool ResolveIgnoreFromMap(FullscreenProcessInfo info)
     {
+        if (info.IsDefaultIgnoreApplied || ProcessMonitorService.IsDefaultIgnoreKey(info.IgnoreKey))
+        {
+            return true;
+        }
+
         if (_fullscreenIgnoreMap.TryGetValue(info.IgnoreKey, out var ignored))
         {
             return ignored;

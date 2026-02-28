@@ -52,8 +52,9 @@ dotnet.exe run --project src/AutoHdrSwitcher -- --config C:\path\to\config.json
 - 每条进程规则可选设置目标显示器。可选目标包括：`Default`（优先窗口所在显示器，窗口未找到时回退主显示器；若进程曾有窗口后窗口消失，则视为退出中并暂不回退主显示器）、`Switch All Displays`（仅对当前命中临时将 HDR 目标设为所有显示器）、具体显示器（强制目标为指定显示器）。若设置的显示器当前不可用，配置值会保留，运行时按 `Default` 处理。
 - 命中进程表还会显示 `Fullscreen`（全屏/无边框窗口启发式判断）。
 - 全屏表支持对每个进程勾选 `Ignore`。被忽略的条目不会影响自动全屏 HDR 模式。
-- Ignore 键优先使用可执行文件路径（`path:<fullpath>`），否则使用进程名（`name:<processName>`）。
-- 内置默认忽略项会在缺失时自动补全，包括 `pathprefix:C:\Windows\` 以及一组常见进程名（例如：`name:TextInputHost`、`name:dwm`、`name:explorer`、`name:chrome`、`name:msedge` 等）。
+- 全屏表会隐藏“内置默认忽略且仍处于忽略状态”的条目（例如：`TextInputHost`、`NVIDIA Overlay`、`WerFault`、`nvcontainer`）。
+- Ignore 键支持 `path:<fullpath>`、`pathprefix:<prefix>`、`name:<processName>`、`regex:<pattern>`。
+- 内置默认忽略项会在缺失时自动补全，包括 `pathprefix:C:\Windows\`、一组常见进程名，以及一组默认正则模式（用于覆盖 `GameBar*`、`OAWrapper*`、`NVIDIA/nv*`、`AMD/ati*`、`Intel/igfx*`、常见 updater 变体等）。
 - 运行时分割布局（表格高度）会保存到配置并在下次启动时恢复；窗口位置/大小/最大化状态由 WinForms 用户设置持久化。
 
 ## 规则配置
@@ -78,7 +79,7 @@ dotnet.exe run --project src/AutoHdrSwitcher -- --config C:\path\to\config.json
 - `switchAllDisplaysTogether`（默认 `false`）
 - `mainSplitterDistance`（规则区/运行时区分割位置）
 - `runtimeTopSplitterDistance` / `runtimeBottomSplitterDistance`（`null` 表示使用内置默认值，默认大约显示 2 行）
-- `fullscreenIgnoreMap`（ignore key -> bool 的字典，支持 `path:...`、`pathprefix:...`、`name:...`）
+- `fullscreenIgnoreMap`（ignore key -> bool 的字典，支持 `path:...`、`pathprefix:...`、`name:...`、`regex:...`）
 - `displayAutoModes`（显示器名 -> 自动控制开关；省略或 `true` 表示自动，`false` 表示手动）
 - `processTargetDisplayOverrides`（进程键 -> 目标显示器的字典，优先级高于规则 `targetDisplay`；进程键支持 `path:...` 与 `name:...`）
 

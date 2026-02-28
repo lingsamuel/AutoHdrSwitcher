@@ -57,8 +57,9 @@ Default behavior:
   If a pinned display is currently unavailable, the value is kept and runtime behavior falls back to `Default`.
 - Matched process table also shows `Fullscreen` (fullscreen/borderless-windowed heuristic).
 - Fullscreen table supports `Ignore` checkbox per process. Ignored entries do not affect auto-fullscreen HDR mode.
-- Ignore key uses executable path when available (`path:<fullpath>`), otherwise process name (`name:<processName>`).
-- Built-in default ignores are auto-generated when missing, including `pathprefix:C:\Windows\` and a larger default process-name set (for example: `name:TextInputHost`, `name:dwm`, `name:explorer`, `name:chrome`, `name:msedge`, etc.).
+- Fullscreen table hides built-in default-ignored entries while they remain ignored (for example: `TextInputHost`, `NVIDIA Overlay`, `WerFault`, `nvcontainer`).
+- Ignore key supports `path:<fullpath>`, `pathprefix:<prefix>`, `name:<processName>`, and `regex:<pattern>`.
+- Built-in default ignores are auto-generated when missing, including `pathprefix:C:\Windows\`, default process names, and default regex patterns (for variant names such as `GameBar*`, `OAWrapper*`, `NVIDIA/nv*`, `AMD/ati*`, `Intel/igfx*`, and common updater process names).
 - Runtime split layout is saved in config; window size/position/maximized state is saved with WinForms user settings.
 
 ## Rule Configuration
@@ -83,7 +84,7 @@ Top-level config fields:
 - `switchAllDisplaysTogether` (default `false`)
 - `mainSplitterDistance` (rules/runtime split)
 - `runtimeTopSplitterDistance` / `runtimeBottomSplitterDistance` (`null` = use built-in defaults, about 2 rows visible by default)
-- `fullscreenIgnoreMap` (dictionary of ignore key -> bool, supports `path:...`, `pathprefix:...`, `name:...`)
+- `fullscreenIgnoreMap` (dictionary of ignore key -> bool, supports `path:...`, `pathprefix:...`, `name:...`, `regex:...`)
 - `displayAutoModes` (dictionary of display name -> auto flag; omitted/`true` = auto, `false` = manual)
 - `processTargetDisplayOverrides` (dictionary of process key -> target display, higher priority than rule `targetDisplay`; process key supports `path:...` and `name:...`)
 

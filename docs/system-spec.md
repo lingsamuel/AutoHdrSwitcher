@@ -72,19 +72,26 @@ Fullscreen runtime table columns:
 5. `Matched Rule`
 6. `Ignore` (editable)
 
+Note:
+
+1. Built-in default-ignored fullscreen entries are hidden from this table while ignored.
+
 ### 3.4 Ignore System
 
-Ignore map keys support three forms:
+Ignore map keys support four forms:
 
 1. `path:<full-executable-path>` (highest priority)
 2. `pathprefix:<path-prefix>` (middle priority)
 3. `name:<process-name>` (fallback)
+4. `regex:<pattern>` (process-name regex, case-insensitive)
 
 Default ignore entries are auto-added to config when missing:
 
 1. `pathprefix:C:\Windows\`
 2. `name:TextInputHost`
 3. `name:dwm`
+4. Additional common noise process names (for example: `name:WerFault`, `name:NVIDIA Overlay`, `name:OAWrapper`, `name:nvcontainer`, plus AMD/Intel/audio/network driver helper processes)
+5. Default regex patterns for variant names (for example: `regex:^gamebar.*$`, `regex:^oawrapper.*$`, `regex:^(?:nvidia.*|nv(?:container|backend|telemetrycontainer).*)$`, and updater-name variants)
 
 ### 3.5 HDR Action Model
 

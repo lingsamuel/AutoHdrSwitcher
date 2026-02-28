@@ -12,7 +12,8 @@
   "fullscreenIgnoreMap": {
     "pathprefix:C:\\Windows\\": true,
     "name:TextInputHost": true,
-    "name:dwm": true
+    "name:dwm": true,
+    "regex:^gamebar.*$": true
   },
   "displayAutoModes": {},
   "processTargetDisplayOverrides": {},

@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Text.RegularExpressions;
 using AutoHdrSwitcher.Display;
 using AutoHdrSwitcher.Logging;
 using AutoHdrSwitcher.Matching;
@@ -11,6 +12,7 @@ namespace AutoHdrSwitcher.Monitoring;
 public sealed class ProcessMonitorService
 {
     private const string DefaultWindowsPathPrefix = @"C:\Windows\";
+    private const string RegexIgnoreKeyPrefix = "regex:";
     private static readonly string NormalizedDefaultWindowsPathPrefix = NormalizePath(DefaultWindowsPathPrefix);
 
     private static readonly string[] DefaultIgnoredProcessNameSeeds =
@@ -49,9 +51,76 @@ public sealed class ProcessMonitorService
         "fping",
         "wsl",
         "wslhost",
+        "WerFault",
+        "WerFaultSecure",
+        "wermgr",
+        "consent",
         "nvngx_update",
         "backgroundtask",
         "gamebarpresenc",
+        "GameBarPresenceWriter",
+        "GameBar",
+        "GameBarFTServer",
+        "GameBarElevatedFTServer",
+        "GameBarExperience",
+        "XboxGameBar",
+        "XboxGameBarWidgets",
+        "XboxPcAppFT",
+
+        // NVIDIA ecosystem (overlay/container/helpers)
+        "OAWrapper",
+        "nvcontainer",
+        "NvBackend",
+        "NvTelemetryContainer",
+        "NVIDIA Overlay",
+        "NVIDIA Share",
+        "NVIDIA App",
+        "NVIDIA Web Helper",
+        "NVIDIA Broadcast",
+
+        // AMD graphics / services
+        "RadeonSoftware",
+        "AMDSoftware",
+        "AMDRSServ",
+        "AMDRSSrcExt",
+        "AMDRSSrExt",
+        "AMDRSSrTray",
+        "atiesrxx",
+        "atieclxx",
+        "AMDCrashDefenderService",
+        "AMD External Events Client Module",
+
+        // Intel graphics / support services
+        "igfxEM",
+        "igfxEMN",
+        "igfxHK",
+        "igfxTray",
+        "igfxCUIServiceN",
+        "IntelCpHDCPSvc",
+        "IntelAudioService",
+        "DSAService",
+
+        // CPU / chipset utility services
+        "AUEPMaster",
+        "AMD3DVCacheSvc",
+        "AMDNoiseSuppression",
+        "ArmouryCrate",
+
+        // Audio driver / enhancement services
+        "RtkAudioService64",
+        "RAVBg64",
+        "NahimicService",
+        "NahimicSvc64",
+        "Nahimic3",
+        "WavesSvc64",
+        "AVoluteSS3Svc",
+
+        // Network driver / utility services
+        "KillerNetworkService",
+        "KillerAnalyticsService",
+        "cfosspeed",
+        "cFosSpeedS",
+        "Netwtw",
 
         // Browsers and browser helpers
         "msedge",
@@ -70,6 +139,17 @@ public sealed class ProcessMonitorService
         "steamwebhelper"
     };
 
+    private static readonly string[] DefaultIgnoredProcessNameRegexSeeds =
+    {
+        "^gamebar.*$",
+        "^xboxgamebar.*$",
+        "^oawrapper.*$",
+        "^(?:nvidia.*|nv(?:container|backend|telemetrycontainer).*)$",
+        "^(?:amd(?:rs|software|crashdefender|noise|3dvcache).*|ati(?:esrxx|eclxx).*)$",
+        "^(?:igfx.*|intel(?:audioservice|cphdcpsvc|dsa).*)$",
+        ".*(?:updater|autoupdate|updatehelper|updateservice|update)$"
+    };
+
     private static readonly HashSet<string> DefaultIgnoredProcessNames = BuildDefaultIgnoredProcessNames();
 
     private readonly ProcessDisplayResolver _displayResolver = new();
@@ -82,11 +162,27 @@ public sealed class ProcessMonitorService
         BuildPathPrefixIgnoreKey(DefaultWindowsPathPrefix);
 
     public static IReadOnlyList<string> DefaultIgnoreKeys { get; } = BuildDefaultIgnoreKeys();
+    private static readonly HashSet<string> DefaultIgnoreKeySet = new(DefaultIgnoreKeys, StringComparer.OrdinalIgnoreCase);
 
     public static bool IsDefaultIgnoredProcessName(string processName)
     {
         var normalizedName = NormalizeProcessNameForIgnore(processName);
-        return !string.IsNullOrWhiteSpace(normalizedName) && DefaultIgnoredProcessNames.Contains(normalizedName);
+        if (string.IsNullOrWhiteSpace(normalizedName))
+        {
+            return false;
+        }
+
+        if (DefaultIgnoredProcessNames.Contains(normalizedName))
+        {
+            return true;
+        }
+
+        return TryResolveDefaultNameRegexKey(normalizedName, out _);
+    }
+
+    public static bool IsDefaultIgnoreKey(string ignoreKey)
+    {
+        return !string.IsNullOrWhiteSpace(ignoreKey) && DefaultIgnoreKeySet.Contains(ignoreKey);
     }
 
     public ProcessMonitorSnapshot Evaluate(
@@ -906,36 +1002,13 @@ public sealed class ProcessMonitorService
         out bool isIgnored,
         out bool isDefaultIgnoreApplied)
     {
-        var normalizedName = processName.Trim();
+        var normalizedName = NormalizeProcessNameForIgnore(processName);
         var nameKey = BuildNameIgnoreKey(normalizedName);
         var pathKey = string.IsNullOrWhiteSpace(executablePath)
             ? string.Empty
             : BuildPathIgnoreKey(executablePath);
 
-        if (!string.IsNullOrEmpty(pathKey) && ignoreMap.TryGetValue(pathKey, out var pathIgnored))
-        {
-            ignoreKey = pathKey;
-            isIgnored = pathIgnored;
-            isDefaultIgnoreApplied = false;
-            return;
-        }
-
-        if (TryResolvePathPrefixIgnore(executablePath, ignoreMap, out var pathPrefixKey, out var pathPrefixIgnored))
-        {
-            ignoreKey = pathPrefixKey;
-            isIgnored = pathPrefixIgnored;
-            isDefaultIgnoreApplied = false;
-            return;
-        }
-
-        if (ignoreMap.TryGetValue(nameKey, out var nameIgnored))
-        {
-            ignoreKey = nameKey;
-            isIgnored = nameIgnored;
-            isDefaultIgnoreApplied = false;
-            return;
-        }
-
+        // Built-in default ignores are mandatory and cannot be overridden by user map entries.
         if (IsDefaultIgnoredPath(executablePath))
         {
             ignoreKey = DefaultWindowsPathPrefixIgnoreKey;
@@ -944,10 +1017,57 @@ public sealed class ProcessMonitorService
             return;
         }
 
-        var defaultIgnored = IsDefaultIgnoredProcessName(normalizedName);
+        if (DefaultIgnoredProcessNames.Contains(normalizedName))
+        {
+            ignoreKey = BuildNameIgnoreKey(normalizedName);
+            isIgnored = true;
+            isDefaultIgnoreApplied = true;
+            return;
+        }
+
+        if (TryResolveDefaultNameRegexKey(normalizedName, out var defaultRegexKey))
+        {
+            ignoreKey = defaultRegexKey;
+            isIgnored = true;
+            isDefaultIgnoreApplied = true;
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(pathKey) && ignoreMap.TryGetValue(pathKey, out var pathIgnored))
+        {
+            ignoreKey = pathKey;
+            isIgnored = ResolveConfiguredIgnore(pathKey, pathIgnored);
+            isDefaultIgnoreApplied = IsDefaultIgnoreKey(pathKey);
+            return;
+        }
+
+        if (TryResolvePathPrefixIgnore(executablePath, ignoreMap, out var pathPrefixKey, out var pathPrefixIgnored))
+        {
+            ignoreKey = pathPrefixKey;
+            isIgnored = ResolveConfiguredIgnore(pathPrefixKey, pathPrefixIgnored);
+            isDefaultIgnoreApplied = IsDefaultIgnoreKey(pathPrefixKey);
+            return;
+        }
+
+        if (ignoreMap.TryGetValue(nameKey, out var nameIgnored))
+        {
+            ignoreKey = nameKey;
+            isIgnored = ResolveConfiguredIgnore(nameKey, nameIgnored);
+            isDefaultIgnoreApplied = IsDefaultIgnoreKey(nameKey);
+            return;
+        }
+
+        if (TryResolveRegexIgnore(processName, ignoreMap, out var regexKey, out var regexIgnored))
+        {
+            ignoreKey = regexKey;
+            isIgnored = ResolveConfiguredIgnore(regexKey, regexIgnored);
+            isDefaultIgnoreApplied = IsDefaultIgnoreKey(regexKey);
+            return;
+        }
+
         ignoreKey = !string.IsNullOrEmpty(pathKey) ? pathKey : nameKey;
-        isIgnored = defaultIgnored;
-        isDefaultIgnoreApplied = defaultIgnored;
+        isIgnored = false;
+        isDefaultIgnoreApplied = false;
     }
 
     private static void ResolveProcessTargetDisplayOverride(
@@ -1028,10 +1148,16 @@ public sealed class ProcessMonitorService
         return $"name:{processName.Trim()}";
     }
 
+    public static string BuildRegexIgnoreKey(string regexPattern)
+    {
+        return $"{RegexIgnoreKeyPrefix}{regexPattern.Trim()}";
+    }
+
     private static IReadOnlyList<string> BuildDefaultIgnoreKeys()
     {
         var keys = new List<string> { DefaultWindowsPathPrefixIgnoreKey };
         keys.AddRange(DefaultIgnoredProcessNames.Select(BuildNameIgnoreKey));
+        keys.AddRange(DefaultIgnoredProcessNameRegexSeeds.Select(BuildRegexIgnoreKey));
         return keys;
     }
 
@@ -1098,6 +1224,40 @@ public sealed class ProcessMonitorService
         return bestMatchLength >= 0;
     }
 
+    private static bool TryResolveRegexIgnore(
+        string processName,
+        IReadOnlyDictionary<string, bool> ignoreMap,
+        out string ignoreKey,
+        out bool isIgnored)
+    {
+        ignoreKey = string.Empty;
+        isIgnored = false;
+        foreach (var entry in ignoreMap)
+        {
+            if (!entry.Key.StartsWith(RegexIgnoreKeyPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var pattern = entry.Key[RegexIgnoreKeyPrefix.Length..].Trim();
+            if (string.IsNullOrWhiteSpace(pattern))
+            {
+                continue;
+            }
+
+            if (!IsProcessNameMatchedByRegex(processName, pattern))
+            {
+                continue;
+            }
+
+            ignoreKey = entry.Key;
+            isIgnored = entry.Value;
+            return true;
+        }
+
+        return false;
+    }
+
     private static bool IsDefaultIgnoredPath(string? executablePath)
     {
         if (string.IsNullOrWhiteSpace(executablePath))
@@ -1127,6 +1287,61 @@ public sealed class ProcessMonitorService
         }
 
         return normalized;
+    }
+
+    private static bool TryResolveDefaultNameRegexKey(string processName, out string ignoreKey)
+    {
+        foreach (var pattern in DefaultIgnoredProcessNameRegexSeeds)
+        {
+            if (!IsProcessNameMatchedByRegex(processName, pattern))
+            {
+                continue;
+            }
+
+            ignoreKey = BuildRegexIgnoreKey(pattern);
+            return true;
+        }
+
+        ignoreKey = string.Empty;
+        return false;
+    }
+
+    private static bool IsProcessNameMatchedByRegex(string processName, string pattern)
+    {
+        var normalized = NormalizeProcessNameForIgnore(processName);
+        if (string.IsNullOrWhiteSpace(normalized) || string.IsNullOrWhiteSpace(pattern))
+        {
+            return false;
+        }
+
+        var candidates = new[]
+        {
+            processName.Trim(),
+            normalized,
+            normalized + ".exe"
+        };
+
+        try
+        {
+            foreach (var candidate in candidates)
+            {
+                if (Regex.IsMatch(candidate, pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+                {
+                    return true;
+                }
+            }
+        }
+        catch (ArgumentException)
+        {
+            // Ignore invalid regex entries from config.
+        }
+
+        return false;
+    }
+
+    private static bool ResolveConfiguredIgnore(string ignoreKey, bool configuredIgnore)
+    {
+        return IsDefaultIgnoreKey(ignoreKey) || configuredIgnore;
     }
 
     private static string NormalizePath(string path)
