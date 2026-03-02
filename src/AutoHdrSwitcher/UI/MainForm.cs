@@ -49,6 +49,7 @@ public sealed class MainForm : Form
     private readonly Dictionary<string, bool> _displayAutoModes = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _processTargetDisplayOverrides = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<int, PendingStartEventInfo> _pendingStartEvents = new();
+    private ProcessWatchRule[] _processEventRuleSnapshot = Array.Empty<ProcessWatchRule>();
     private readonly System.Windows.Forms.Timer _monitorTimer = new();
     private readonly System.Windows.Forms.Timer _eventBurstTimer = new();
     private readonly System.Windows.Forms.Timer _displayRefreshTimer = new();
@@ -1134,6 +1135,7 @@ public sealed class MainForm : Form
         AppLogger.Info("Start monitoring requested.");
         _nextFullscreenAllEventRefreshAt = DateTimeOffset.MinValue;
         _eventBurstRemaining = 0;
+        UpdateProcessEventRuleSnapshot(BuildRulesFromUi(commitEdits: false));
         _eventStreamAvailable = EnsureProcessEventsStarted();
         _monitoringActive = true;
         ApplyPollingMode();
@@ -1254,10 +1256,20 @@ public sealed class MainForm : Form
             CommitPendingRuleEdits();
         }
 
-        return _ruleRows
+        var rules = _ruleRows
             .Select(static row => row.ToRule())
             .Where(static rule => !string.IsNullOrWhiteSpace(rule.Pattern))
             .ToList();
+        UpdateProcessEventRuleSnapshot(rules);
+        return rules;
+    }
+
+    private void UpdateProcessEventRuleSnapshot(IReadOnlyCollection<ProcessWatchRule> rules)
+    {
+        var snapshot = rules.Count == 0
+            ? Array.Empty<ProcessWatchRule>()
+            : rules.ToArray();
+        Volatile.Write(ref _processEventRuleSnapshot, snapshot);
     }
 
     private void CommitPendingRuleEdits()
@@ -2691,33 +2703,55 @@ public sealed class MainForm : Form
             return;
         }
 
-        if (InvokeRequired)
+        var callbackObservedAtUtc = DateTimeOffset.UtcNow;
+        if (ShouldIgnoreProcessEventByDefault(e))
         {
-            BeginInvoke(new Action(() => HandleProcessEventOnUiThread(e)));
+            AppLogger.Info(
+                $"Dropping default-ignored process event before UI dispatch. seq={e.SequenceId}; type={e.EventType}; pid={e.ProcessId}; name={e.ProcessName}");
             return;
         }
 
-        HandleProcessEventOnUiThread(e);
+        if (InvokeRequired)
+        {
+            BeginInvoke(new Action(() => HandleProcessEventOnUiThread(e, callbackObservedAtUtc)));
+            return;
+        }
+
+        HandleProcessEventOnUiThread(e, callbackObservedAtUtc);
     }
 
-    private void HandleProcessEventOnUiThread(ProcessEventNotification e)
+    private void HandleProcessEventOnUiThread(ProcessEventNotification e, DateTimeOffset callbackObservedAtUtc)
     {
-        var uiReceivedAtUtc = DateTimeOffset.UtcNow;
-        var eventToUiMs = Math.Max(0D, (uiReceivedAtUtc - e.ReceivedAtUtc).TotalMilliseconds);
+        var uiStartedAtUtc = DateTimeOffset.UtcNow;
+        var handlingStopwatch = Stopwatch.StartNew();
+        var callbackToUiMs = Math.Max(0D, (uiStartedAtUtc - callbackObservedAtUtc).TotalMilliseconds);
+        var eventToCallbackMs = Math.Max(0D, (callbackObservedAtUtc - e.ReceivedAtUtc).TotalMilliseconds);
+        var eventToUiStartMs = Math.Max(0D, (uiStartedAtUtc - e.ReceivedAtUtc).TotalMilliseconds);
+        void LogEventTiming(string outcome)
+        {
+            var uiEndedAtUtc = DateTimeOffset.UtcNow;
+            var uiHandleMs = Math.Max(0D, handlingStopwatch.Elapsed.TotalMilliseconds);
+            var eventToUiEndMs = Math.Max(0D, (uiEndedAtUtc - e.ReceivedAtUtc).TotalMilliseconds);
+            AppLogger.Info(
+                $"UI process event timing. seq={e.SequenceId}; type={e.EventType}; pid={e.ProcessId}; name={e.ProcessName}; mode={e.StreamMode}; eventClass={e.EventClassName}; createdUtc={DescribeUtc(e.EventCreatedAtUtc)}; eventReceivedUtc={e.ReceivedAtUtc:O}; callbackObservedUtc={callbackObservedAtUtc:O}; uiStartedUtc={uiStartedAtUtc:O}; uiEndedUtc={uiEndedAtUtc:O}; deliveryMs={DescribeLatency(e.DeliveryLatencyMs)}; eventToCallbackMs={eventToCallbackMs:F3}; callbackToUiMs={callbackToUiMs:F3}; eventToUiStartMs={eventToUiStartMs:F3}; uiHandleMs={uiHandleMs:F3}; eventToUiEndMs={eventToUiEndMs:F3}; outcome={outcome}");
+        }
+
         if (!_monitoringActive)
         {
             AppLogger.Info(
-                $"Ignoring process event because monitoring is inactive. seq={e.SequenceId}; type={e.EventType}; pid={e.ProcessId}; name={e.ProcessName}; eventToUiMs={eventToUiMs:F3}");
+                $"Ignoring process event because monitoring is inactive. seq={e.SequenceId}; type={e.EventType}; pid={e.ProcessId}; name={e.ProcessName}; eventToUiStartMs={eventToUiStartMs:F3}");
+            LogEventTiming("ignored-monitoring-inactive");
             return;
         }
 
         var rules = BuildRulesFromUi(commitEdits: false);
         CleanupStalePendingStartEvents();
         TrackRecentStartedProcess(e, rules);
-        if (ShouldIgnoreProcessEventByDefault(e, rules))
+        if (ShouldIgnoreProcessEventByDefault(e))
         {
             AppLogger.Info(
                 $"Ignoring default-ignored process event. seq={e.SequenceId}; type={e.EventType}; pid={e.ProcessId}; name={e.ProcessName}");
+            LogEventTiming("ignored-default");
             return;
         }
 
@@ -2732,9 +2766,10 @@ public sealed class MainForm : Form
         var fullscreenFallbackRefresh = monitorAllFullscreen && !ruleNameMatch && !proactiveTraceStartRefresh;
         var shouldReact = ruleNameMatch || proactiveTraceStartRefresh || fullscreenFallbackRefresh;
         AppLogger.Info(
-            $"UI process event decision. seq={e.SequenceId}; type={e.EventType}; mode={e.StreamMode}; pid={e.ProcessId}; name={e.ProcessName}; eventClass={e.EventClassName}; deliveryMs={DescribeLatency(e.DeliveryLatencyMs)}; eventToUiMs={eventToUiMs:F3}; ruleNameMatch={ruleNameMatch}; monitorAllFullscreen={monitorAllFullscreen}; fullscreenFallbackRefresh={fullscreenFallbackRefresh}; shouldReact={shouldReact}; proactiveTraceStartRefresh={proactiveTraceStartRefresh}; rules={rules.Count}; refreshInFlight={_refreshInFlight}; pending={_snapshotRefreshPending}; burstRemaining={_eventBurstRemaining}");
+            $"UI process event decision. seq={e.SequenceId}; type={e.EventType}; mode={e.StreamMode}; pid={e.ProcessId}; name={e.ProcessName}; eventClass={e.EventClassName}; deliveryMs={DescribeLatency(e.DeliveryLatencyMs)}; eventToUiStartMs={eventToUiStartMs:F3}; eventToCallbackMs={eventToCallbackMs:F3}; callbackToUiMs={callbackToUiMs:F3}; ruleNameMatch={ruleNameMatch}; monitorAllFullscreen={monitorAllFullscreen}; fullscreenFallbackRefresh={fullscreenFallbackRefresh}; shouldReact={shouldReact}; proactiveTraceStartRefresh={proactiveTraceStartRefresh}; rules={rules.Count}; refreshInFlight={_refreshInFlight}; pending={_snapshotRefreshPending}; burstRemaining={_eventBurstRemaining}");
         if (!shouldReact)
         {
+            LogEventTiming("ignored-no-reaction");
             return;
         }
 
@@ -2746,6 +2781,7 @@ public sealed class MainForm : Form
                 var remainingMs = (_nextFullscreenAllEventRefreshAt - nowUtc).TotalMilliseconds;
                 AppLogger.Info(
                     $"Skipping fullscreen fallback event refresh due to throttle. seq={e.SequenceId}; type={e.EventType}; pid={e.ProcessId}; name={e.ProcessName}; remainingMs={remainingMs:F0}");
+                LogEventTiming("ignored-fullscreen-throttle");
                 return;
             }
 
@@ -2756,6 +2792,7 @@ public sealed class MainForm : Form
         {
             AppLogger.Info(
                 $"Skipping additional event-triggered refresh scheduling because one refresh is in-flight and one is already queued. seq={e.SequenceId}; type={e.EventType}; pid={e.ProcessId}");
+            LogEventTiming("ignored-refresh-and-queued");
             return;
         }
 
@@ -2764,6 +2801,7 @@ public sealed class MainForm : Form
             AppLogger.Info(
                 $"Queueing a single follow-up snapshot refresh for event while refresh is in-flight. seq={e.SequenceId}; type={e.EventType}; pid={e.ProcessId}");
             _ = RefreshSnapshotAsync($"process-event:{e.EventType}", e);
+            LogEventTiming("queued-after-inflight");
             return;
         }
 
@@ -2772,6 +2810,7 @@ public sealed class MainForm : Form
             AppLogger.Info(
                 $"Scheduling single fullscreen fallback refresh without burst. seq={e.SequenceId}; throttleMs={FullscreenAllEventRefreshThrottleMs}");
             _ = RefreshSnapshotAsync($"process-event:{e.EventType}", e);
+            LogEventTiming("scheduled-single-refresh");
             return;
         }
 
@@ -2785,6 +2824,7 @@ public sealed class MainForm : Form
         _eventBurstTimer.Stop();
         _eventBurstTimer.Start();
         _ = RefreshSnapshotAsync($"process-event:{e.EventType}", e);
+        LogEventTiming("scheduled-burst-refresh");
     }
 
     private static bool IsRuleNameMatchForProcessEvent(
@@ -2846,8 +2886,7 @@ public sealed class MainForm : Form
         }
 
         if (!string.IsNullOrWhiteSpace(normalizedName) &&
-            ProcessMonitorService.IsDefaultIgnoredProcessName(normalizedName) &&
-            !IsRuleNameMatch(rawProcessName, rules))
+            ProcessMonitorService.IsDefaultIgnoredProcessName(normalizedName))
         {
             return;
         }
@@ -2912,9 +2951,7 @@ public sealed class MainForm : Form
         RebuildRecentStartedRows(rules);
     }
 
-    private static bool ShouldIgnoreProcessEventByDefault(
-        ProcessEventNotification e,
-        IReadOnlyCollection<ProcessWatchRule> rules)
+    private static bool ShouldIgnoreProcessEventByDefault(ProcessEventNotification e)
     {
         var normalized = NormalizeProcessNameForEventFilter(e.ProcessName);
         if (string.IsNullOrWhiteSpace(normalized))
@@ -2927,13 +2964,14 @@ public sealed class MainForm : Form
             return false;
         }
 
-        // If user explicitly writes a rule for this process name, do not suppress event handling.
-        if (rules.Count > 0 &&
-            (ProcessWatchMatcher.IsMatchAny(e.ProcessName, rules) ||
-             ProcessWatchMatcher.IsMatchAny(normalized + ".exe", rules)))
-        {
-            return false;
-        }
+        // 强制提前退出以避免入队列
+        // // If user explicitly writes a rule for this process name, do not suppress event handling.
+        // if (rules.Count > 0 &&
+        //     (ProcessWatchMatcher.IsMatchAny(e.ProcessName, rules) ||
+        //      ProcessWatchMatcher.IsMatchAny(normalized + ".exe", rules)))
+        // {
+        //     return false;
+        // }
 
         return true;
     }

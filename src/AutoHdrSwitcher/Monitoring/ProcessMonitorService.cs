@@ -69,6 +69,8 @@ public sealed class ProcessMonitorService
 
         // NVIDIA ecosystem (overlay/container/helpers)
         "OAWrapper",
+        "NvOAWrapperCache",
+        "NvOAWrapperCac",
         "nvcontainer",
         "NvBackend",
         "NvTelemetryContainer",
@@ -144,6 +146,7 @@ public sealed class ProcessMonitorService
         "^gamebar.*$",
         "^xboxgamebar.*$",
         "^oawrapper.*$",
+        "^nvoawrapper.*$",
         "^(?:nvidia.*|nv(?:container|backend|telemetrycontainer).*)$",
         "^(?:amd(?:rs|software|crashdefender|noise|3dvcache).*|ati(?:esrxx|eclxx).*)$",
         "^(?:igfx.*|intel(?:audioservice|cphdcpsvc|dsa).*)$",
