@@ -8,7 +8,7 @@ Including this README, and this DISCLAIMER.
 # AutoHdrSwitcher
 
 Windows desktop app for process-rule configuration and live monitor status.
-When a matched process is running, the app tries to enable HDR only on the display where that process window is shown; when no matched process remains on a display, HDR is turned off for that display.
+When a matched process is running, the app tries to enable HDR only on the display where that process window is shown; when no matched process remains on a display, HDR is turned off for that display after a configurable delay (`hdrOffDelaySeconds`, default 30s).
 If the matched process is found but its game window display is not yet resolvable, HDR fallback target is the primary display until the real window display can be resolved.
 If a matched process had a resolved window before but its window disappears while the process is still alive, it is treated as exiting and does not keep driving HDR target changes until a window appears again.
 Process start/stop event stream is enabled (WMI) so matching and HDR switching react faster than pure polling.
@@ -40,6 +40,7 @@ Default behavior:
 - If config file is missing, app auto-creates it (`config.json` in app directory by default).
 - If no rules are configured, app keeps running and shows status instead of exiting.
 - Polling is optional and disabled by default. App prefers process event stream for fast reaction.
+- HDR off delay is enabled by default (`30` seconds) to reduce frequent HDR toggles when games restart or switch.
 - When `enableLogging=true`, runtime logs are written to `logs/autohdrswitcher.log` under app base directory, and reset on every app launch.
 - `Close to tray` (`minimizeToTray`) is enabled by default. Closing the window hides it to tray instead of exiting.
 - Minimizing the window also hides it to tray (removed from taskbar).
@@ -76,6 +77,7 @@ Fields per rule row:
 Top-level config fields:
 
 - `pollIntervalSeconds` (default 2)
+- `hdrOffDelaySeconds` (default 30; `0` means disable delay and turn off immediately when no matches remain)
 - `pollingEnabled` (default `false`)
 - `minimizeToTray` (default `true`)
 - `enableLogging` (default `false`; when disabled, file logging is off)

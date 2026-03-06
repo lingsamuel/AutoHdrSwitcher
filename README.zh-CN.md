@@ -8,7 +8,7 @@
 # AutoHdrSwitcher
 
 这是一个 Windows 桌面应用，用于配置进程匹配规则并实时展示监控状态。  
-当命中的进程在运行时，应用会尝试只在该进程窗口所在的显示器上开启 HDR；当某个显示器上不再有命中进程时，会关闭该显示器的 HDR。  
+当命中的进程在运行时，应用会尝试只在该进程窗口所在的显示器上开启 HDR；当某个显示器上不再有命中进程时，会在可配置的延迟后关闭该显示器 HDR（`hdrOffDelaySeconds`，默认 30 秒）。  
 如果已经检测到命中进程，但其游戏窗口暂时无法解析到具体显示器，会先回退到主显示器开启 HDR，直到能解析出真实窗口所在显示器。  
 如果某个命中进程曾经解析到窗口、随后窗口全部消失但进程仍存活，会被视为“退出中”，在窗口再次出现前不会继续驱动 HDR 目标切换。  
 项目启用了进程启动/退出事件流（WMI），因此匹配与 HDR 切换相比纯轮询更快。
@@ -40,6 +40,7 @@ dotnet.exe run --project src/AutoHdrSwitcher -- --config C:\path\to\config.json
 - 如果配置文件不存在，应用会自动创建（默认是程序目录下的 `config.json`）。
 - 如果没有配置任何规则，应用不会退出，而是继续运行并显示状态。
 - 轮询是可选项，默认关闭。程序优先使用进程事件流（WMI）来更快响应。
+- 默认启用 HDR 延迟关闭（`30` 秒），用于减少游戏重启或切换时 HDR 频繁开关。
 - `Close to tray`（`minimizeToTray`）默认开启：点击窗口关闭按钮时会隐藏到系统托盘而不是退出。
 - 最小化窗口也会隐藏到系统托盘（从任务栏移除）。
 - 单击托盘图标可在隐藏/恢复之间切换。
@@ -71,6 +72,7 @@ dotnet.exe run --project src/AutoHdrSwitcher -- --config C:\path\to\config.json
 顶层配置字段：
 
 - `pollIntervalSeconds`（默认 2）
+- `hdrOffDelaySeconds`（默认 30；设为 `0` 表示关闭延迟、无命中时立即关 HDR）
 - `pollingEnabled`（默认 `false`）
 - `minimizeToTray`（默认 `true`）
 - `enableLogging`（默认 `false`；关闭后禁用文件日志）

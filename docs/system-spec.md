@@ -1,8 +1,8 @@
 # AutoHdrSwitcher System Spec
 
-Version: `1.0.0`  
+Version: `1.1.4`  
 Status: `Implemented`  
-Last updated: `2026-02-24`
+Last updated: `2026-03-06`
 
 ## 1. Scope
 
@@ -98,7 +98,7 @@ Default ignore entries are auto-added to config when missing:
 Per display:
 
 1. `desired=true` when at least one matched/eligible fullscreen process maps to that display.
-2. `desired=false` when no matched/eligible process maps to that display.
+2. `desired=false` when no matched/eligible process maps to that display, after `hdrOffDelaySeconds` has elapsed (default `30` seconds, `0` means immediate off).
 3. If HDR is unsupported, action is reported as unsupported.
 4. If desired differs from current HDR state, app attempts change and reports action result.
 
@@ -147,7 +147,8 @@ Behavior requirements:
 2. Tooltips are disabled.
 3. `Poll (sec)` control is disabled when `Enable polling` is unchecked.
 4. Poll controls are on second row, right aligned.
-5. `Minimize to tray` is configurable and default `true`.
+5. `HDR off delay (sec)` is configurable in top controls; default `30`.
+6. `Minimize to tray` is configurable and default `true`.
 
 ### 3.8 Persistence
 
@@ -159,16 +160,20 @@ Config file path:
 Persisted in `config.json`:
 
 1. `pollIntervalSeconds`
-2. `pollingEnabled`
-3. `minimizeToTray`
-4. `enableLogging`
-5. `autoRequestAdminForTrace`
-6. `monitorAllFullscreenProcesses`
-7. `mainSplitterDistance`
-8. `runtimeTopSplitterDistance`
-9. `runtimeBottomSplitterDistance`
-10. `fullscreenIgnoreMap`
-11. `processRules`
+2. `hdrOffDelaySeconds`
+3. `pollingEnabled`
+4. `minimizeToTray`
+5. `enableLogging`
+6. `autoRequestAdminForTrace`
+7. `monitorAllFullscreenProcesses`
+8. `switchAllDisplaysTogether`
+9. `mainSplitterDistance`
+10. `runtimeTopSplitterDistance`
+11. `runtimeBottomSplitterDistance`
+12. `fullscreenIgnoreMap`
+13. `displayAutoModes`
+14. `processTargetDisplayOverrides`
+15. `processRules`
 
 Window placement persistence:
 

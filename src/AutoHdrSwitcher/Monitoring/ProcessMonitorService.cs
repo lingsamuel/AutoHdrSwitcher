@@ -160,6 +160,9 @@ public sealed class ProcessMonitorService
     // Track only processes that can affect HDR decisions (matched or monitor-all-fullscreen),
     // so window-loss can be treated as "exiting" instead of falling back to primary.
     private readonly HashSet<int> _processesWithObservedWindow = new();
+    private readonly HashSet<string> _lastMatchedDisplaysForHdrOffDelay = new(StringComparer.OrdinalIgnoreCase);
+    private DateTimeOffset _lastHdrOnDemandAtUtc = DateTimeOffset.MinValue;
+    private bool _lastForceSwitchAllDisplaysByTargetForHdrOffDelay;
 
     public static string DefaultWindowsPathPrefixIgnoreKey { get; } =
         BuildPathPrefixIgnoreKey(DefaultWindowsPathPrefix);
@@ -194,12 +197,14 @@ public sealed class ProcessMonitorService
         IReadOnlyDictionary<string, bool> fullscreenIgnoreMap,
         bool switchAllDisplaysTogether,
         IReadOnlyDictionary<string, bool> displayAutoModes,
-        IReadOnlyDictionary<string, string> processTargetDisplayOverrides)
+        IReadOnlyDictionary<string, string> processTargetDisplayOverrides,
+        int hdrOffDelaySeconds)
     {
         ArgumentNullException.ThrowIfNull(rules);
         ArgumentNullException.ThrowIfNull(fullscreenIgnoreMap);
         ArgumentNullException.ThrowIfNull(displayAutoModes);
         ArgumentNullException.ThrowIfNull(processTargetDisplayOverrides);
+        var normalizedHdrOffDelaySeconds = Math.Max(0, hdrOffDelaySeconds);
 
         var evaluationStopwatch = Stopwatch.StartNew();
         var processArray = Process.GetProcesses();
@@ -360,15 +365,19 @@ public sealed class ProcessMonitorService
             }
         }
 
-        var displayStatuses = EvaluateDisplayHdrStates(
+        var hdrDecisionContext = ResolveHdrDecisionContextWithOffDelay(
             matchedDisplays,
+            forceSwitchAllDisplaysByTarget,
+            normalizedHdrOffDelaySeconds);
+        var displayStatuses = EvaluateDisplayHdrStates(
+            hdrDecisionContext.MatchedDisplays,
             switchAllDisplaysTogether,
             displayAutoModes,
-            forceSwitchAllDisplaysByTarget);
+            hdrDecisionContext.ForceSwitchAllDisplaysByTarget);
         CleanupObservedWindowState(activeProcessIds);
         evaluationStopwatch.Stop();
         AppLogger.Info(
-            $"Process evaluation finished. durationMs={evaluationStopwatch.Elapsed.TotalMilliseconds:F3}; processCount={processArray.Length}; windowCount={resolvedWindows.Count}; matches={matches.Count}; fullscreen={fullscreenProcesses.Count}; pathLookupAttempts={pathLookupAttempts}; pathLookupSucceeded={pathLookupSucceeded}; requiresPathCandidates={requiresPathCandidates}; hasPathTargetOverrides={hasPathTargetOverrides}");
+            $"Process evaluation finished. durationMs={evaluationStopwatch.Elapsed.TotalMilliseconds:F3}; processCount={processArray.Length}; windowCount={resolvedWindows.Count}; matches={matches.Count}; fullscreen={fullscreenProcesses.Count}; pathLookupAttempts={pathLookupAttempts}; pathLookupSucceeded={pathLookupSucceeded}; requiresPathCandidates={requiresPathCandidates}; hasPathTargetOverrides={hasPathTargetOverrides}; hdrOffDelaySeconds={normalizedHdrOffDelaySeconds}");
         matches.Sort(static (a, b) => a.ProcessName.CompareTo(b.ProcessName));
         fullscreenProcesses.Sort(static (a, b) =>
         {
@@ -762,6 +771,66 @@ public sealed class ProcessMonitorService
         }
 
         return ruleTargetDisplay.Trim();
+    }
+
+    private HdrDecisionContext ResolveHdrDecisionContextWithOffDelay(
+        HashSet<string> matchedDisplays,
+        bool forceSwitchAllDisplaysByTarget,
+        int hdrOffDelaySeconds)
+    {
+        if (matchedDisplays.Count > 0 || forceSwitchAllDisplaysByTarget)
+        {
+            CacheHdrOffDelayAnchor(matchedDisplays, forceSwitchAllDisplaysByTarget, DateTimeOffset.UtcNow);
+            return new HdrDecisionContext(matchedDisplays, forceSwitchAllDisplaysByTarget);
+        }
+
+        if (hdrOffDelaySeconds <= 0 || _lastHdrOnDemandAtUtc == DateTimeOffset.MinValue)
+        {
+            ClearHdrOffDelayAnchor();
+            return new HdrDecisionContext(matchedDisplays, forceSwitchAllDisplaysByTarget);
+        }
+
+        var nowUtc = DateTimeOffset.UtcNow;
+        var elapsedSeconds = Math.Max(0D, (nowUtc - _lastHdrOnDemandAtUtc).TotalSeconds);
+        if (elapsedSeconds >= hdrOffDelaySeconds)
+        {
+            AppLogger.Info(
+                $"HDR off delay expired. delaySeconds={hdrOffDelaySeconds}; elapsedSeconds={elapsedSeconds:F3}");
+            ClearHdrOffDelayAnchor();
+            return new HdrDecisionContext(matchedDisplays, forceSwitchAllDisplaysByTarget);
+        }
+
+        var effectiveMatchedDisplays = new HashSet<string>(_lastMatchedDisplaysForHdrOffDelay, StringComparer.OrdinalIgnoreCase);
+        var effectiveForceSwitchAllDisplays = _lastForceSwitchAllDisplaysByTargetForHdrOffDelay;
+        var remainingSeconds = Math.Max(0D, hdrOffDelaySeconds - elapsedSeconds);
+        var heldDisplayList = effectiveMatchedDisplays.Count == 0
+            ? "<none>"
+            : string.Join(",", effectiveMatchedDisplays.OrderBy(static name => name, StringComparer.OrdinalIgnoreCase));
+        AppLogger.Info(
+            $"HDR off delay active. delaySeconds={hdrOffDelaySeconds}; elapsedSeconds={elapsedSeconds:F3}; remainingSeconds={remainingSeconds:F3}; heldDisplays={heldDisplayList}; heldForceAllDisplays={effectiveForceSwitchAllDisplays}");
+        return new HdrDecisionContext(effectiveMatchedDisplays, effectiveForceSwitchAllDisplays);
+    }
+
+    private void CacheHdrOffDelayAnchor(
+        IReadOnlyCollection<string> matchedDisplays,
+        bool forceSwitchAllDisplaysByTarget,
+        DateTimeOffset observedAtUtc)
+    {
+        _lastMatchedDisplaysForHdrOffDelay.Clear();
+        foreach (var matchedDisplay in matchedDisplays)
+        {
+            _lastMatchedDisplaysForHdrOffDelay.Add(matchedDisplay);
+        }
+
+        _lastForceSwitchAllDisplaysByTargetForHdrOffDelay = forceSwitchAllDisplaysByTarget;
+        _lastHdrOnDemandAtUtc = observedAtUtc;
+    }
+
+    private void ClearHdrOffDelayAnchor()
+    {
+        _lastMatchedDisplaysForHdrOffDelay.Clear();
+        _lastForceSwitchAllDisplaysByTargetForHdrOffDelay = false;
+        _lastHdrOnDemandAtUtc = DateTimeOffset.MinValue;
     }
 
     private List<HdrDisplayStatus> EvaluateDisplayHdrStates(
@@ -1351,6 +1420,10 @@ public sealed class ProcessMonitorService
     {
         return path.Trim().Replace('/', '\\');
     }
+
+    private sealed record HdrDecisionContext(
+        HashSet<string> MatchedDisplays,
+        bool ForceSwitchAllDisplaysByTarget);
 
     private sealed class DisplayTargetResolution
     {

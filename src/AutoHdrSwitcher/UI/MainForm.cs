@@ -14,6 +14,9 @@ public sealed class MainForm : Form
     private const string AppIconResourceName = "AutoHdrSwitcher.Assets.AppIcon.ico";
     private const int MinPollSeconds = 1;
     private const int MaxPollSeconds = 30;
+    private const int MinHdrOffDelaySeconds = 0;
+    private const int MaxHdrOffDelaySeconds = 600;
+    private const int DefaultHdrOffDelaySeconds = 30;
     private const int MainTopPanelMinSize = 120;
     private const int MainBottomPanelMinSize = 220;
     private const int RuntimeTopPanelMinSize = 60;
@@ -68,6 +71,8 @@ public sealed class MainForm : Form
     private GroupBox _displayGroup = null!;
     private Label _pollLabel = null!;
     private NumericUpDown _pollSecondsInput = null!;
+    private Label _hdrOffDelayLabel = null!;
+    private NumericUpDown _hdrOffDelaySecondsInput = null!;
     private CheckBox _pollingEnabledCheck = null!;
     private CheckBox _minimizeToTrayCheck = null!;
     private CheckBox _enableLoggingCheck = null!;
@@ -259,6 +264,28 @@ public sealed class MainForm : Form
             Margin = new Padding(0, 2, 0, 0)
         };
 
+        _hdrOffDelayLabel = new Label
+        {
+            Text = "HDR off delay (sec):",
+            AutoSize = true,
+            TextAlign = ContentAlignment.MiddleCenter,
+            Margin = new Padding(12, 5, 4, 0)
+        };
+
+        _hdrOffDelaySecondsInput = new NumericUpDown
+        {
+            Minimum = MinHdrOffDelaySeconds,
+            Maximum = MaxHdrOffDelaySeconds,
+            Value = DefaultHdrOffDelaySeconds,
+            Width = 72,
+            Margin = new Padding(0, 2, 0, 0)
+        };
+        _hdrOffDelaySecondsInput.ValueChanged += (_, _) =>
+        {
+            MarkDirty();
+            TriggerRuleRefreshIfMonitoring("hdr-off-delay-changed");
+        };
+
         _pollingEnabledCheck = new CheckBox
         {
             Text = "Enable polling",
@@ -367,6 +394,8 @@ public sealed class MainForm : Form
         };
         pollRow.Controls.Add(_pollLabel);
         pollRow.Controls.Add(_pollSecondsInput);
+        pollRow.Controls.Add(_hdrOffDelayLabel);
+        pollRow.Controls.Add(_hdrOffDelaySecondsInput);
         pollRow.Controls.Add(_pollingEnabledCheck);
 
         actionsRow.Controls.Add(addRuleButton);
@@ -1180,7 +1209,7 @@ public sealed class MainForm : Form
         {
             var rules = BuildRulesFromUi(commitEdits: false);
             AppLogger.Info(
-                $"Snapshot refresh start. requestId={requestId}; reason={reason}; rules={rules.Count}; monitorAllFullscreen={_monitorAllFullscreenCheck.Checked}; switchAllDisplays={_switchAllDisplaysCheck.Checked}; trigger={DescribeTrigger(triggerEvent)}");
+                $"Snapshot refresh start. requestId={requestId}; reason={reason}; rules={rules.Count}; monitorAllFullscreen={_monitorAllFullscreenCheck.Checked}; switchAllDisplays={_switchAllDisplaysCheck.Checked}; hdrOffDelaySeconds={(int)_hdrOffDelaySecondsInput.Value}; trigger={DescribeTrigger(triggerEvent)}");
             var snapshot = await Task.Run(
                 () => _monitorService.Evaluate(
                     rules,
@@ -1188,7 +1217,8 @@ public sealed class MainForm : Form
                     _fullscreenIgnoreMap,
                     _switchAllDisplaysCheck.Checked,
                     _displayAutoModes,
-                    _processTargetDisplayOverrides));
+                    _processTargetDisplayOverrides,
+                    (int)_hdrOffDelaySecondsInput.Value));
             stopwatch.Stop();
             AppLogger.Info(
                 $"Snapshot refresh evaluated. requestId={requestId}; reason={reason}; durationMs={stopwatch.Elapsed.TotalMilliseconds:F3}; processes={snapshot.ProcessCount}; matches={snapshot.Matches.Count}; fullscreen={snapshot.FullscreenProcesses.Count}; displays={snapshot.Displays.Count}");
@@ -1493,7 +1523,14 @@ public sealed class MainForm : Form
                 pollSeconds = 2;
             }
 
+            var hdrOffDelaySeconds = loaded.HdrOffDelaySeconds;
+            if (hdrOffDelaySeconds < MinHdrOffDelaySeconds || hdrOffDelaySeconds > MaxHdrOffDelaySeconds)
+            {
+                hdrOffDelaySeconds = DefaultHdrOffDelaySeconds;
+            }
+
             _pollSecondsInput.Value = pollSeconds;
+            _hdrOffDelaySecondsInput.Value = hdrOffDelaySeconds;
             _pollingEnabledCheck.Checked = loaded.PollingEnabled;
             _minimizeToTrayCheck.Checked = loaded.MinimizeToTray;
             _enableLoggingCheck.Checked = loaded.EnableLogging;
@@ -1633,6 +1670,7 @@ public sealed class MainForm : Form
             var config = new WatchConfiguration
             {
                 PollIntervalSeconds = (int)_pollSecondsInput.Value,
+                HdrOffDelaySeconds = (int)_hdrOffDelaySecondsInput.Value,
                 PollingEnabled = _pollingEnabledCheck.Checked,
                 MinimizeToTray = _minimizeToTrayCheck.Checked,
                 EnableLogging = _enableLoggingCheck.Checked,

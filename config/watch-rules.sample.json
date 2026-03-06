@@ -1,5 +1,6 @@
 {
   "pollIntervalSeconds": 2,
+  "hdrOffDelaySeconds": 30,
   "pollingEnabled": false,
   "minimizeToTray": true,
   "enableLogging": true,

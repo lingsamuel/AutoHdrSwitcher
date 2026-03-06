@@ -7,6 +7,8 @@ public sealed class WatchConfiguration
 {
     public int PollIntervalSeconds { get; init; } = 2;
 
+    public int HdrOffDelaySeconds { get; init; } = 30;
+
     public bool PollingEnabled { get; init; }
 
     public bool MinimizeToTray { get; init; } = true;
