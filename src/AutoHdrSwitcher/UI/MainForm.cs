@@ -394,9 +394,9 @@ public sealed class MainForm : Form
         };
         pollRow.Controls.Add(_pollLabel);
         pollRow.Controls.Add(_pollSecondsInput);
+        pollRow.Controls.Add(_pollingEnabledCheck);
         pollRow.Controls.Add(_hdrOffDelayLabel);
         pollRow.Controls.Add(_hdrOffDelaySecondsInput);
-        pollRow.Controls.Add(_pollingEnabledCheck);
 
         actionsRow.Controls.Add(addRuleButton);
         actionsRow.Controls.Add(removeRuleButton);
