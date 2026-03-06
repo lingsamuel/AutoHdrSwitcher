@@ -161,7 +161,7 @@ public sealed class ProcessMonitorService
     // so window-loss can be treated as "exiting" instead of falling back to primary.
     private readonly HashSet<int> _processesWithObservedWindow = new();
     private readonly HashSet<string> _lastMatchedDisplaysForHdrOffDelay = new(StringComparer.OrdinalIgnoreCase);
-    private DateTimeOffset _lastHdrOnDemandAtUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset _hdrOffDelayStartedAtUtc = DateTimeOffset.MinValue;
     private bool _lastForceSwitchAllDisplaysByTargetForHdrOffDelay;
 
     public static string DefaultWindowsPathPrefixIgnoreKey { get; } =
@@ -780,18 +780,25 @@ public sealed class ProcessMonitorService
     {
         if (matchedDisplays.Count > 0 || forceSwitchAllDisplaysByTarget)
         {
-            CacheHdrOffDelayAnchor(matchedDisplays, forceSwitchAllDisplaysByTarget, DateTimeOffset.UtcNow);
+            CacheHdrOffDelayAnchor(matchedDisplays, forceSwitchAllDisplaysByTarget);
             return new HdrDecisionContext(matchedDisplays, forceSwitchAllDisplaysByTarget);
         }
 
-        if (hdrOffDelaySeconds <= 0 || _lastHdrOnDemandAtUtc == DateTimeOffset.MinValue)
+        if (hdrOffDelaySeconds <= 0 || !HasCachedHdrOnDemandContext())
         {
             ClearHdrOffDelayAnchor();
             return new HdrDecisionContext(matchedDisplays, forceSwitchAllDisplaysByTarget);
         }
 
+        if (_hdrOffDelayStartedAtUtc == DateTimeOffset.MinValue)
+        {
+            _hdrOffDelayStartedAtUtc = DateTimeOffset.UtcNow;
+            AppLogger.Info(
+                $"HDR off delay started. delaySeconds={hdrOffDelaySeconds}; startedAtUtc={_hdrOffDelayStartedAtUtc:O}");
+        }
+
         var nowUtc = DateTimeOffset.UtcNow;
-        var elapsedSeconds = Math.Max(0D, (nowUtc - _lastHdrOnDemandAtUtc).TotalSeconds);
+        var elapsedSeconds = Math.Max(0D, (nowUtc - _hdrOffDelayStartedAtUtc).TotalSeconds);
         if (elapsedSeconds >= hdrOffDelaySeconds)
         {
             AppLogger.Info(
@@ -813,8 +820,7 @@ public sealed class ProcessMonitorService
 
     private void CacheHdrOffDelayAnchor(
         IReadOnlyCollection<string> matchedDisplays,
-        bool forceSwitchAllDisplaysByTarget,
-        DateTimeOffset observedAtUtc)
+        bool forceSwitchAllDisplaysByTarget)
     {
         _lastMatchedDisplaysForHdrOffDelay.Clear();
         foreach (var matchedDisplay in matchedDisplays)
@@ -823,14 +829,19 @@ public sealed class ProcessMonitorService
         }
 
         _lastForceSwitchAllDisplaysByTargetForHdrOffDelay = forceSwitchAllDisplaysByTarget;
-        _lastHdrOnDemandAtUtc = observedAtUtc;
+        _hdrOffDelayStartedAtUtc = DateTimeOffset.MinValue;
     }
 
     private void ClearHdrOffDelayAnchor()
     {
         _lastMatchedDisplaysForHdrOffDelay.Clear();
         _lastForceSwitchAllDisplaysByTargetForHdrOffDelay = false;
-        _lastHdrOnDemandAtUtc = DateTimeOffset.MinValue;
+        _hdrOffDelayStartedAtUtc = DateTimeOffset.MinValue;
+    }
+
+    private bool HasCachedHdrOnDemandContext()
+    {
+        return _lastMatchedDisplaysForHdrOffDelay.Count > 0 || _lastForceSwitchAllDisplaysByTargetForHdrOffDelay;
     }
 
     private List<HdrDisplayStatus> EvaluateDisplayHdrStates(
