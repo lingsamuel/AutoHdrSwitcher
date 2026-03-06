@@ -27,8 +27,6 @@ public sealed class MainForm : Form
     private const int FullscreenAllEventRefreshThrottleMs = 1000;
     private const int PendingStartEventRetentionSeconds = 180;
     private const int MaxRecentStartedProcessRows = 10;
-    private const int MaxRecentRowsPerProcessName = 2;
-    private const int RecentSameNameBurstWindowSeconds = 8;
     private static readonly Icon? AppIconTemplate = LoadAppIconTemplate();
     private static readonly HashSet<string> DefaultFullscreenIgnoreKeys =
         new(ProcessMonitorService.DefaultIgnoreKeys, StringComparer.OrdinalIgnoreCase);
@@ -2892,18 +2890,12 @@ public sealed class MainForm : Form
         }
 
         var startedAtUtc = e.EventCreatedAtUtc ?? e.ReceivedAtUtc;
-        if (e.ProcessId > 0 &&
-            _recentStartedProcesses.Any(process => process.ProcessId == e.ProcessId))
+        var uniqueProcessKey = BuildRecentStartedUniqueKey(rawProcessName, normalizedName);
+        var existingIndex = _recentStartedProcesses.FindIndex(process =>
+            string.Equals(process.UniqueProcessKey, uniqueProcessKey, StringComparison.OrdinalIgnoreCase));
+        if (existingIndex >= 0)
         {
-            return;
-        }
-
-        if (!string.IsNullOrWhiteSpace(normalizedName) &&
-            _recentStartedProcesses.Any(process =>
-                string.Equals(process.NormalizedProcessName, normalizedName, StringComparison.OrdinalIgnoreCase) &&
-                Math.Abs((startedAtUtc - process.StartedAtUtc).TotalSeconds) <= RecentSameNameBurstWindowSeconds))
-        {
-            return;
+            _recentStartedProcesses.RemoveAt(existingIndex);
         }
 
         var rulePattern = NormalizeProcessNameForManualRule(rawProcessName);
@@ -2919,27 +2911,10 @@ public sealed class MainForm : Form
             ProcessName = rulePattern,
             RawProcessName = rawProcessName,
             NormalizedProcessName = normalizedName,
+            UniqueProcessKey = uniqueProcessKey,
             RulePattern = rulePattern,
             StartedAtUtc = startedAtUtc
         });
-
-        if (!string.IsNullOrWhiteSpace(normalizedName))
-        {
-            var overflowIndexesForSameName = _recentStartedProcesses
-                .Select((process, index) => (process, index))
-                .Where(item => string.Equals(
-                    item.process.NormalizedProcessName,
-                    normalizedName,
-                    StringComparison.OrdinalIgnoreCase))
-                .Skip(MaxRecentRowsPerProcessName)
-                .Select(static item => item.index)
-                .OrderByDescending(static index => index)
-                .ToArray();
-            foreach (var overflowIndex in overflowIndexesForSameName)
-            {
-                _recentStartedProcesses.RemoveAt(overflowIndex);
-            }
-        }
 
         if (_recentStartedProcesses.Count > MaxRecentStartedProcessRows)
         {
@@ -2949,6 +2924,19 @@ public sealed class MainForm : Form
         }
 
         RebuildRecentStartedRows(rules);
+    }
+
+    private static string BuildRecentStartedUniqueKey(string rawProcessName, string normalizedName)
+    {
+        if (!string.IsNullOrWhiteSpace(normalizedName))
+        {
+            return normalizedName;
+        }
+
+        var fallback = NormalizeProcessNameForEventFilter(rawProcessName);
+        return string.IsNullOrWhiteSpace(fallback)
+            ? rawProcessName.Trim()
+            : fallback;
     }
 
     private static bool ShouldIgnoreProcessEventByDefault(ProcessEventNotification e)
@@ -3153,6 +3141,8 @@ public sealed class MainForm : Form
         public required string ProcessName { get; init; }
 
         public required string NormalizedProcessName { get; init; }
+
+        public required string UniqueProcessKey { get; init; }
 
         public required string RulePattern { get; init; }
 
